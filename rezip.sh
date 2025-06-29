@@ -1,17 +1,31 @@
 #!/bin/bash
-# Bash Script: 7z 轉 tar.zst 冷儲存轉換工具
+# Bash Script: 7z 轉 tar.zst 冷儲存封存工具
 # 作者: AI Assistant
-# 用途: 將 7z 檔案轉換為 tar.zst 格式以供冷儲存備份
+# 用途: 將 7z 檔案轉換為 tar.zst 格式並產生完整的冷儲存封存檔案組
 #
-# 🎯 Zstd 冷儲存最佳化參數:
+# 🎯 冷儲存封存 SOP 流程:
+# 1. 解壓縮 7z 檔案
+# 2. 建立 deterministic tar 封存 (--sort=name, 保留原始時間戳和所有者)
+# 3. zstd 壓縮 (最佳化參數)
+# 4. 雙重雜湊驗證 (SHA-256 + BLAKE3)
+# 5. PAR2 修復冗餘 (10%)
+# 6. 多層驗證確保完整性
+#
+# 🗜️ Zstd 冷儲存最佳化參數:
 # -19: 高壓縮等級，平衡壓縮比和速度
-# --long: 長距離匹配，改善重複資料的壓縮效果，使用預設值以提升解壓縮相容性
+# --long=31: 2GB dictionary window，用於大檔案優化，壓縮率提升 3-10%
 # --check: 內建完整性檢查，確保資料正確性
 #
 # 📋 大檔案處理 (>4GB) 及跨平台相容性:
 # - 預設使用 POSIX tar 格式，確保跨平台相容性且支援大檔案
 # - 備用方案: GNU 格式 (如果 POSIX 不可用)
 # - 不支援 ustar 格式 (有 4GB 限制，不適合大檔案處理)
+#
+# 📦 輸出檔案:
+# - exp42.tar.zst (主檔，含 32-bit zstd checksum)
+# - exp42.tar.zst.sha256 (SHA-256 雜湊)
+# - exp42.tar.zst.blake3 (BLAKE3 雜湊)
+# - exp42.tar.zst.par2 (10% PAR2 修復冗餘，待實作)
 
 # 顯示使用說明
 show_usage() {
@@ -25,7 +39,7 @@ show_usage() {
   -l, --level NUM        壓縮等級 (1-22, 預設: 19)
                          等級 20-22 會自動啟用 Ultra 模式
   -t, --threads NUM      執行緒數量 (0=所有核心, 預設: 0)
-  --no-long              停用長距離匹配 (預設會啟用長距離匹配)
+  --no-long              停用長距離匹配 (預設啟用 --long=31，2GB dictionary window)
   --no-check             停用完整性檢查 (預設會啟用完整性檢查)
   -h, --help             顯示此說明
 
@@ -34,10 +48,10 @@ show_usage() {
   $0 /path/to/7z/files                  # 處理指定目錄的 7z 檔案
   $0 -l 15 -t 4 /path/to/files          # 使用自訂壓縮等級和執行緒數
   $0 -l 22 ~/archives                   # 使用最高壓縮等級 (自動啟用 Ultra 模式)
-  $0 --no-long --no-check ~/archives    # 停用長距離匹配和完整性檢查
+  $0 --no-long --no-check ~/archives    # 停用 2GB dictionary 和完整性檢查
 
 注意:
-  - 需要安裝: 7z, tar (支援 POSIX/GNU 格式), zstd, bc, sha256sum
+  - 需要安裝: 7z, tar (支援 POSIX/GNU 格式), zstd, bc, sha256sum, b3sum, par2
   - 轉換後的檔案會保存在同一目錄中
 EOF
 }
@@ -263,6 +277,20 @@ check_required_tools() {
         sha256_status="✗ 缺少"
     fi
     
+    # 檢查 b3sum (BLAKE3)
+    local b3sum_status="✓ 已找到"
+    if ! command -v b3sum &> /dev/null; then
+        missing+=("b3sum")
+        b3sum_status="✗ 缺少"
+    fi
+    
+    # 檢查 par2 (PAR2 修復)
+    local par2_status="✓ 已找到"
+    if ! command -v par2 &> /dev/null; then
+        missing+=("par2")
+        par2_status="✗ 缺少"
+    fi
+    
     # 顯示所有工具檢查結果
     log_success "工具檢查結果:"
     log_detail "7z 狀態: $sevenz_status"
@@ -270,9 +298,17 @@ check_required_tools() {
     log_detail "zstd 狀態: $zstd_status"
     log_detail "bc 狀態: $bc_status"
     log_detail "sha256sum 狀態: $sha256_status"
+    log_detail "b3sum 狀態: $b3sum_status"
+    log_detail "par2 狀態: $par2_status"
     
     if [ ${#missing[@]} -ne 0 ]; then
-        log_error "缺少必要工具: ${missing[*]}。請安裝後重試。"
+        log_error "缺少必要工具: ${missing[*]}"
+        log_detail ""
+        log_detail "安裝建議 (Ubuntu/Debian):"
+        log_detail "sudo apt update && apt install tar zstd par2cmdline b3sum"
+        log_detail ""
+        log_detail "注意: 7z, bc, sha256sum 通常已預裝"
+        log_detail "如果系統沒有 b3sum，請從 https://github.com/BLAKE3-team/BLAKE3 下載"
         exit 1
     fi
     
@@ -455,9 +491,9 @@ compress_to_tar_zst() {
         zstd_params+=("-T0")  # 使用所有可用核心
     fi
     
-    # 長距離匹配
+    # 長距離匹配 (2GB dictionary window 用於大檔案優化)
     if [ "$long_mode" = true ]; then
-        zstd_params+=("--long")
+        zstd_params+=("--long=31")
     fi
     
     # 完整性檢查
@@ -467,8 +503,6 @@ compress_to_tar_zst() {
     
     # 強制覆蓋已存在的檔案
     zstd_params+=("--force")
-    
-    log_detail "zstd 參數: ${zstd_params[*]}"
     
     # 顯示資料夾大小資訊
     local folder_size
@@ -499,6 +533,15 @@ compress_to_tar_zst() {
         return 1
     fi
     
+    # 顯示最終參數 (在 best_format 確定之後)
+    log_detail "tar 參數: --sort=name --format=$best_format (deterministic 檔案排序)"
+    log_detail "zstd 參數: ${zstd_params[*]}"
+    
+    # 顯示記憶體需求警告 (針對 --long=31)
+    if [ "$long_mode" = true ]; then
+        log_detail "記憶體需求: 壓縮約需 2.2GB RAM，解壓約需 2GB RAM (--long=31)"
+    fi
+    
     # 切換到輸入目錄的父目錄
     local current_dir=$(pwd)
     local parent_dir=$(dirname "$input_dir")
@@ -506,8 +549,8 @@ compress_to_tar_zst() {
     
     cd "$parent_dir" || return 1
     
-    # 執行壓縮 (使用 POSIX 或 GNU 格式)
-    if ! tar --format="$best_format" -cf - "$folder_name" | zstd "${zstd_params[@]}" > "$output_file"; then
+    # 執行壓縮 (使用 POSIX 或 GNU 格式 + deterministic 排序)
+    if ! tar --sort=name --format="$best_format" -cf - "$folder_name" | zstd "${zstd_params[@]}" > "$output_file"; then
         log_error "壓縮失敗"
         cd "$current_dir"
         return 1
@@ -518,7 +561,7 @@ compress_to_tar_zst() {
 }
 
 # 產生 SHA256 校驗和檔案
-generate_checksum_file() {
+generate_sha256_file() {
     local file_path="$1"
     
     local hash
@@ -531,11 +574,28 @@ generate_checksum_file() {
     
     # 先輸出路徑，再顯示成功訊息（重定向到 stderr）
     echo "$checksum_file"
-    log_success "校驗和檔案已產生: $checksum_file" >&2
+    log_success "SHA256 雜湊檔案已產生: $checksum_file" >&2
 }
 
-# 驗證校驗和檔案
-verify_checksum() {
+# 產生 BLAKE3 雜湊檔案
+generate_blake3_file() {
+    local file_path="$1"
+    
+    local hash
+    hash=$(b3sum "$file_path" | cut -d' ' -f1)
+    local checksum_file="$file_path.blake3"
+    local file_name
+    file_name=$(basename "$file_path")
+    
+    echo "$hash  $file_name" > "$checksum_file"
+    
+    # 先輸出路徑，再顯示成功訊息（重定向到 stderr）
+    echo "$checksum_file"
+    log_success "BLAKE3 雜湊檔案已產生: $checksum_file" >&2
+}
+
+# 驗證 SHA256 校驗和檔案
+verify_sha256() {
     local file_path="$1"
     local checksum_file="$2"
     
@@ -545,12 +605,113 @@ verify_checksum() {
     actual_hash=$(sha256sum "$file_path" | cut -d' ' -f1)
     
     if [ "$expected_hash" = "$actual_hash" ]; then
-        log_success "校驗和驗證通過"
+        log_success "SHA256 雜湊驗證通過"
         return 0
     else
-        log_error "校驗和驗證失敗！預期: $expected_hash，實際: $actual_hash"
+        log_error "SHA256 雜湊驗證失敗！預期: $expected_hash，實際: $actual_hash"
         return 1
     fi
+}
+
+# 驗證 BLAKE3 雜湊檔案
+verify_blake3() {
+    local file_path="$1"
+    local checksum_file="$2"
+    
+    local expected_hash
+    expected_hash=$(cut -d' ' -f1 "$checksum_file")
+    local actual_hash
+    actual_hash=$(b3sum "$file_path" | cut -d' ' -f1)
+    
+    if [ "$expected_hash" = "$actual_hash" ]; then
+        log_success "BLAKE3 雜湊驗證通過"
+        return 0
+    else
+        log_error "BLAKE3 雜湊驗證失敗！預期: $expected_hash，實際: $actual_hash"
+        return 1
+    fi
+}
+
+# 統一雜湊管理函數 - 產生雙重雜湊檔案
+generate_dual_hashes() {
+    local file_path="$1"
+    local sha256_file=""
+    local blake3_file=""
+    
+    log_step "產生雙重雜湊檔案 (SHA-256 + BLAKE3)..." >&2
+    
+    # 產生 SHA256 雜湊
+    if sha256_file=$(generate_sha256_file "$file_path"); then
+        log_detail "SHA256: $(basename "$sha256_file")" >&2
+    else
+        log_error "SHA256 雜湊產生失敗" >&2
+        return 1
+    fi
+    
+    # 產生 BLAKE3 雜湊
+    if blake3_file=$(generate_blake3_file "$file_path"); then
+        log_detail "BLAKE3: $(basename "$blake3_file")" >&2
+    else
+        log_error "BLAKE3 雜湊產生失敗" >&2
+        # 清理已產生的 SHA256 檔案
+        rm -f "$sha256_file" 2>/dev/null
+        return 1
+    fi
+    
+    log_success "雙重雜湊檔案產生完成" >&2
+    
+    # 輸出產生的檔案路徑 (只輸出到 stdout，供主流程解析)
+    echo "$sha256_file"
+    echo "$blake3_file"
+}
+
+# 統一雜湊管理函數 - 驗證雙重雜湊
+verify_dual_hashes() {
+    local file_path="$1"
+    local sha256_file="$2"
+    local blake3_file="$3"
+    
+    log_step "驗證雙重雜湊 (SHA-256 + BLAKE3)..."
+    
+    local sha256_result=false
+    local blake3_result=false
+    
+    # 驗證 SHA256
+    if [ -f "$sha256_file" ]; then
+        if verify_sha256 "$file_path" "$sha256_file"; then
+            sha256_result=true
+        fi
+    else
+        log_error "SHA256 雜湊檔案不存在: $sha256_file"
+    fi
+    
+    # 驗證 BLAKE3
+    if [ -f "$blake3_file" ]; then
+        if verify_blake3 "$file_path" "$blake3_file"; then
+            blake3_result=true
+        fi
+    else
+        log_error "BLAKE3 雜湊檔案不存在: $blake3_file"
+    fi
+    
+    # 檢查雙重驗證結果
+    if [ "$sha256_result" = true ] && [ "$blake3_result" = true ]; then
+        log_success "雙重雜湊驗證通過 (SHA-256 ✓ + BLAKE3 ✓)"
+        return 0
+    else
+        log_error "雙重雜湊驗證失敗 (SHA-256: $sha256_result, BLAKE3: $blake3_result)"
+        return 1
+    fi
+}
+
+# 向後相容函數 - 保持原有函數名稱
+generate_checksum_file() {
+    generate_sha256_file "$@"
+}
+
+# 向後相容函數 - 保持原有函數名稱
+verify_checksum() {
+    verify_sha256 "$@"
 }
 
 # 主要處理函數
@@ -578,7 +739,7 @@ process_7z_files() {
     else
         log_detail "執行緒: $THREADS 個核心"
     fi
-    log_detail "長距離匹配: $([ "$LONG_MODE" = true ] && echo "啟用" || echo "停用")"
+    log_detail "長距離匹配: $([ "$LONG_MODE" = true ] && echo "啟用 (--long=31, 2GB dictionary)" || echo "停用")"
     log_detail "完整性檢查: $([ "$ENABLE_CHECK" = true ] && echo "啟用" || echo "停用")"
     printf "\n"
     
@@ -658,14 +819,17 @@ process_7z_files() {
                 local output_file="$WORK_DIRECTORY/$base_name.tar.zst"
                 if compress_to_tar_zst "$extracted_dir" "$output_file" "$COMPRESSION_LEVEL" "$THREADS" "$LONG_MODE" "$ENABLE_CHECK" "$ULTRA_MODE"; then
                     
-                    # 步驟 4: 產生校驗和檔案
-                    log_step "產生校驗和檔案..."
-                    local checksum_file
-                    if checksum_file=$(generate_checksum_file "$output_file"); then
+                    # 步驟 4: 產生雙重雜湊檔案 (SHA-256 + BLAKE3)
+                    local hash_files
+                    if hash_files=$(generate_dual_hashes "$output_file"); then
+                        # 解析回傳的檔案路徑 (使用 readarray 更安全)
+                        local hash_array
+                        readarray -t hash_array <<< "$hash_files"
+                        local sha256_file="${hash_array[0]}"
+                        local blake3_file="${hash_array[1]}"
                         
-                        # 步驟 5: 驗證校驗和檔案
-                        log_step "驗證校驗和檔案..."
-                        if verify_checksum "$output_file" "$checksum_file"; then
+                        # 步驟 5: 驗證雙重雜湊
+                        if verify_dual_hashes "$output_file" "$sha256_file" "$blake3_file"; then
                             
                             # 清理解壓縮的臨時檔案
                             rm -rf "$extracted_dir"
@@ -698,11 +862,11 @@ process_7z_files() {
                             file_success=true
                             ((success_count++))
                         else
-                            log_error "校驗和失敗，保留臨時檔案供檢查"
+                            log_error "雙重雜湊驗證失敗，保留臨時檔案供檢查"
                             ((error_count++))
                         fi
                     else
-                        log_error "產生校驗和檔案失敗"
+                        log_error "產生雙重雜湊檔案失敗"
                         ((error_count++))
                     fi
                 else
