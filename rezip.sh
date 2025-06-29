@@ -25,7 +25,7 @@
 # - exp42.tar.zst (主檔，含 32-bit zstd checksum)
 # - exp42.tar.zst.sha256 (SHA-256 雜湊)
 # - exp42.tar.zst.blake3 (BLAKE3 雜湊)
-# - exp42.tar.zst.par2 (10% PAR2 修復冗餘，待實作)
+# - exp42.tar.zst.par2 (10% PAR2 修復冗餘)
 
 # 顯示使用說明
 show_usage() {
@@ -458,7 +458,7 @@ extract_7z_file() {
     fi
 }
 
-# 重新壓縮為 tar.zst
+# 重新壓縮為 tar.zst (分離模式，符合企劃書 SOP)
 compress_to_tar_zst() {
     local input_dir="$1"
     local output_file="$2"
@@ -473,7 +473,10 @@ compress_to_tar_zst() {
         return 1
     fi
     
+    # 準備臨時檔案路徑
     local temp_tar="${output_file%.zst}"
+    local temp_tar_basename=$(basename "$temp_tar")
+    local output_dir=$(dirname "$output_file")
     local zstd_params=()
     
     # 壓縮等級
@@ -516,6 +519,22 @@ compress_to_tar_zst() {
         log_detail "資料夾大小: $folder_size_str"
     fi
     
+    # 檢查磁碟空間（臨時 tar 檔案約等於資料夾大小）
+    if [ -n "$folder_size" ]; then
+        local available_space
+        available_space=$(df "$output_dir" | awk 'NR==2 {print $4 * 1024}')  # 轉換為 bytes
+        local required_space=$((folder_size + 1073741824))  # 資料夾大小 + 1GB 緩衝
+        
+        if [ "$available_space" -lt "$required_space" ]; then
+            local available_gb required_gb
+            available_gb="$(echo "scale=2; $available_space / 1073741824" | bc)"
+            required_gb="$(echo "scale=2; $required_space / 1073741824" | bc)"
+            log_error "磁碟空間不足: 可用 ${available_gb}GB，需要 ${required_gb}GB"
+            return 1
+        fi
+        log_detail "磁碟空間檢查: 可用空間充足"
+    fi
+    
     # 檢查 tar 格式支援
     local supported_formats=($(check_tar_formats))
     local best_format=""
@@ -533,9 +552,11 @@ compress_to_tar_zst() {
         return 1
     fi
     
-    # 顯示最終參數 (在 best_format 確定之後)
+    # 顯示最終參數
+    log_detail "處理模式: 分離模式 (符合企劃書 SOP)"
     log_detail "tar 參數: --sort=name --format=$best_format (deterministic 檔案排序)"
     log_detail "zstd 參數: ${zstd_params[*]}"
+    log_detail "臨時檔案: $temp_tar_basename"
     
     # 顯示記憶體需求警告 (針對 --long=31)
     if [ "$long_mode" = true ]; then
@@ -549,15 +570,117 @@ compress_to_tar_zst() {
     
     cd "$parent_dir" || return 1
     
-    # 執行壓縮 (使用 POSIX 或 GNU 格式 + deterministic 排序)
-    if ! tar --sort=name --format="$best_format" -cf - "$folder_name" | zstd "${zstd_params[@]}" > "$output_file"; then
-        log_error "壓縮失敗"
+    # 清理可能存在的舊臨時檔案
+    if [ -f "$temp_tar" ]; then
+        log_detail "清理舊臨時檔案: $(basename "$temp_tar")"
+        rm -f "$temp_tar"
+    fi
+    
+    # 階段1：創建 deterministic tar 檔案
+    log_step "階段1: 創建 deterministic tar 檔案..." >&2
+    if ! tar --sort=name --format="$best_format" -cf "$temp_tar" "$folder_name"; then
+        log_error "tar 創建失敗"
         cd "$current_dir"
         return 1
     fi
     
+    # 驗證 tar 檔案是否創建成功
+    if [ ! -f "$temp_tar" ]; then
+        log_error "tar 檔案創建失敗: $(basename "$temp_tar")"
+        cd "$current_dir"
+        return 1
+    fi
+    
+    local tar_size
+    tar_size=$(stat -c%s "$temp_tar")
+    local tar_size_str
+    if [ "$tar_size" -gt 1073741824 ]; then  # 1GB
+        tar_size_str="$(echo "scale=2; $tar_size / 1073741824" | bc)GB"
+    else
+        tar_size_str="$(echo "scale=2; $tar_size / 1048576" | bc)MB"
+    fi
+    log_success "tar 檔案創建成功: $(basename "$temp_tar") ($tar_size_str)" >&2
+    
+    # 階段2：驗證 tar header 完整性
+    log_step "階段2: 驗證 tar header 完整性..." >&2
+    if ! tar -tvf "$temp_tar" > /dev/null 2>&1; then
+        log_error "tar header 驗證失敗"
+        rm -f "$temp_tar"  # 清理損壞的檔案
+        cd "$current_dir"
+        return 1
+    fi
+    log_success "tar header 驗證通過" >&2
+    
+    # 階段3：zstd 壓縮
+    log_step "階段3: zstd 壓縮處理..." >&2
+    if ! zstd "${zstd_params[@]}" "$temp_tar" -o "$output_file"; then
+        log_error "zstd 壓縮失敗"
+        rm -f "$temp_tar"  # 清理臨時檔案
+        cd "$current_dir"
+        return 1
+    fi
+    
+    # 驗證壓縮檔案是否創建成功
+    if [ ! -f "$output_file" ]; then
+        log_error "壓縮檔案創建失敗: $(basename "$output_file")"
+        rm -f "$temp_tar"
+        cd "$current_dir"
+        return 1
+    fi
+    
+    local zst_size
+    zst_size=$(stat -c%s "$output_file")
+    local zst_size_str
+    if [ "$zst_size" -gt 1073741824 ]; then  # 1GB
+        zst_size_str="$(echo "scale=2; $zst_size / 1073741824" | bc)GB"
+    else
+        zst_size_str="$(echo "scale=2; $zst_size / 1048576" | bc)MB"
+    fi
+    log_success "zstd 壓縮完成: $(basename "$output_file") ($zst_size_str)" >&2
+    
+    # 階段4：立即驗證壓縮檔案完整性（企劃書步驟4）
+    log_step "階段4: 驗證壓縮檔案完整性..." >&2
+    
+    # 準備驗證參數（需要與壓縮參數一致）
+    local verify_params=()
+    if [ "$long_mode" = true ]; then
+        verify_params+=("--long=31")
+    fi
+    
+    # 4a. zstd 完整性檢查
+    if ! zstd -tq "${verify_params[@]}" "$output_file"; then
+        log_error "zstd 完整性驗證失敗"
+        rm -f "$temp_tar" "$output_file"
+        cd "$current_dir"
+        return 1
+    fi
+    log_detail "zstd 完整性驗證通過" >&2
+    
+    # 4b. 解壓縮後 tar 內容驗證
+    if ! zstd -dc "${verify_params[@]}" "$output_file" | tar -tvf - > /dev/null 2>&1; then
+        log_error "解壓縮後 tar 內容驗證失敗"
+        rm -f "$temp_tar" "$output_file"
+        cd "$current_dir"
+        return 1
+    fi
+    log_detail "解壓縮後 tar 內容驗證通過" >&2
+    log_success "壓縮檔案完整性驗證通過" >&2
+    
+    # 階段5：清理臨時檔案
+    log_step "階段5: 清理臨時檔案..." >&2
+    if rm -f "$temp_tar"; then
+        log_success "臨時檔案清理完成: $(basename "$temp_tar")" >&2
+    else
+        log_warning "臨時檔案清理失敗: $(basename "$temp_tar")" >&2
+    fi
+    
     cd "$current_dir"
-    log_success "已壓縮至: $output_file"
+    
+    # 顯示最終結果
+    local compression_ratio
+    compression_ratio=$(echo "scale=2; $zst_size * 100 / $tar_size" | bc)
+    log_detail "壓縮比: $compression_ratio% (tar: $tar_size_str → zst: $zst_size_str)" >&2
+    log_success "分離模式壓縮完成: $(basename "$output_file")" >&2
 }
 
 # 產生 SHA256 校驗和檔案
@@ -704,6 +827,111 @@ verify_dual_hashes() {
     fi
 }
 
+# PAR2 修復冗餘函數 - 產生 PAR2 修復檔案
+generate_par2_file() {
+    local file_path="$1"
+    local par2_file="${file_path}.par2"
+    
+    log_step "產生 PAR2 修復檔案 (10% 冗餘)..." >&2
+    
+    # 檢查輸入檔案是否存在
+    if [ ! -f "$file_path" ]; then
+        log_error "檔案不存在: $file_path" >&2
+        return 1
+    fi
+    
+    # 計算檔案大小以估算處理時間
+    local file_size
+    file_size=$(stat -c%s "$file_path")
+    local file_size_str
+    if [ "$file_size" -gt 1073741824 ]; then  # 1GB
+        file_size_str="$(echo "scale=2; $file_size/1073741824" | bc) GB"
+        log_detail "檔案大小: $file_size_str，PAR2 處理可能需要較長時間..." >&2
+    else
+        file_size_str="$(echo "scale=2; $file_size/1048576" | bc) MB"
+        log_detail "檔案大小: $file_size_str" >&2
+    fi
+    
+    # 使用 par2 create 命令產生 10% 修復冗餘
+    # -r10: 10% 修復冗餘
+    # -n1: 限制為 1 個修復檔案 (簡化輸出)
+    # -q: 安靜模式，減少輸出
+    # 將所有輸出重定向到 stderr，避免污染返回值
+    if ! par2 create -r10 -n1 -q "$file_path" >&2; then
+        log_error "PAR2 修復檔案產生失敗" >&2
+        return 1
+    fi
+    
+    # 驗證 PAR2 檔案是否成功產生
+    if [ ! -f "$par2_file" ]; then
+        log_error "PAR2 檔案產生失敗: $par2_file" >&2
+        return 1
+    fi
+    
+    # 顯示 PAR2 檔案大小
+    local par2_size
+    par2_size=$(stat -c%s "$par2_file")
+    local par2_size_str
+    if [ "$par2_size" -gt 1048576 ]; then  # 1MB
+        par2_size_str="$(echo "scale=2; $par2_size/1048576" | bc) MB"
+    else
+        par2_size_str="$(echo "scale=2; $par2_size/1024" | bc) KB"
+    fi
+    log_detail "PAR2 檔案大小: $par2_size_str" >&2
+    
+    log_success "PAR2 修復檔案產生完成: $(basename "$par2_file")" >&2
+    
+    # 輸出產生的檔案路徑 (只輸出到 stdout，供主流程解析)
+    echo "$par2_file"
+}
+
+# PAR2 修復冗餘函數 - 驗證 PAR2 修復檔案
+verify_par2() {
+    local file_path="$1"
+    local par2_file="$2"
+    
+    log_step "驗證 PAR2 修復檔案..." >&2
+    
+    # 檢查 PAR2 檔案是否存在
+    if [ ! -f "$par2_file" ]; then
+        log_error "PAR2 檔案不存在: $par2_file" >&2
+        return 1
+    fi
+    
+    # 檢查原始檔案是否存在
+    if [ ! -f "$file_path" ]; then
+        log_error "原始檔案不存在: $file_path" >&2
+        return 1
+    fi
+    
+    # 使用 par2 verify 命令驗證檔案完整性
+    # 不使用 -q 參數，並改善輸出解析邏輯
+    local verify_output
+    local verify_exit_code
+    
+    # 執行 par2 verify 並捕獲退出碼
+    verify_output=$(par2 verify "$par2_file" 2>&1)
+    verify_exit_code=$?
+    
+    # 檢查 par2 命令的退出碼
+    if [ $verify_exit_code -eq 0 ]; then
+        # 退出碼為 0 表示驗證成功
+        # 檢查輸出是否包含錯誤訊息
+        if echo "$verify_output" | grep -q -i "error\|failed\|corrupt\|missing"; then
+            log_error "PAR2 驗證發現問題: $verify_output" >&2
+            return 1
+        else
+            log_success "PAR2 驗證通過 - 檔案完整性正常" >&2
+            log_detail "PAR2 輸出: $(echo "$verify_output" | tr '\n' ' ' | sed 's/  */ /g')" >&2
+            return 0
+        fi
+    else
+        # 退出碼非 0 表示驗證失敗
+        log_error "PAR2 驗證失敗 (退出碼: $verify_exit_code): $verify_output" >&2
+        return 1
+    fi
+}
+
 # 向後相容函數 - 保持原有函數名稱
 generate_checksum_file() {
     generate_sha256_file "$@"
@@ -831,36 +1059,79 @@ process_7z_files() {
                         # 步驟 5: 驗證雙重雜湊
                         if verify_dual_hashes "$output_file" "$sha256_file" "$blake3_file"; then
                             
-                            # 清理解壓縮的臨時檔案
-                            rm -rf "$extracted_dir"
-                            
-                            # 顯示檔案大小比較
-                            local original_size
-                            original_size=$(stat -c%s "$zip_file")
-                            local new_size
-                            new_size=$(stat -c%s "$output_file")
-                            local ratio
-                            ratio=$(echo "scale=2; $new_size * 100 / $original_size" | bc)
-                            
-                            # 格式化檔案大小
-                            local original_size_str new_size_str
-                            if [ "$original_size" -gt 1073741824 ]; then
-                                original_size_str="$(echo "scale=2; $original_size/1073741824" | bc) GB"
+                            # 步驟 6: 產生 PAR2 修復冗餘 (10%)
+                            local par2_file
+                            if par2_file=$(generate_par2_file "$output_file"); then
+                                
+                                                                    # 步驟 7: 驗證 PAR2 修復檔案
+                                if verify_par2 "$output_file" "$par2_file"; then
+                                    
+                                    # 清理解壓縮的臨時檔案
+                                    rm -rf "$extracted_dir"
+                                    
+                                    # 顯示檔案大小比較
+                                    local original_size
+                                    original_size=$(stat -c%s "$zip_file")
+                                    local new_size
+                                    new_size=$(stat -c%s "$output_file")
+                                    # 計算 PAR2 總大小（主檔案 + 所有修復檔案）
+                                    local par2_total_size=0
+                                    local par2_main_size
+                                    par2_main_size=$(stat -c%s "$par2_file")
+                                    par2_total_size=$((par2_total_size + par2_main_size))
+                                    
+                                    # 查找並統計所有相關的 .vol 檔案
+                                    local vol_files
+                                    vol_files=$(find "$(dirname "$par2_file")" -name "$(basename "$output_file").vol*.par2" 2>/dev/null || true)
+                                    if [ -n "$vol_files" ]; then
+                                        while IFS= read -r vol_file; do
+                                            if [ -f "$vol_file" ]; then
+                                                local vol_size
+                                                vol_size=$(stat -c%s "$vol_file")
+                                                par2_total_size=$((par2_total_size + vol_size))
+                                            fi
+                                        done <<< "$vol_files"
+                                    fi
+                                    
+                                    local ratio
+                                    ratio=$(echo "scale=2; $new_size * 100 / $original_size" | bc)
+                                    local par2_ratio
+                                    par2_ratio=$(echo "scale=2; $par2_total_size * 100 / $new_size" | bc)
+                                    
+                                    # 格式化檔案大小
+                                    local original_size_str new_size_str par2_size_str
+                                    if [ "$original_size" -gt 1073741824 ]; then
+                                        original_size_str="$(echo "scale=2; $original_size/1073741824" | bc) GB"
+                                    else
+                                        original_size_str="$(echo "scale=2; $original_size/1048576" | bc) MB"
+                                    fi
+                                    
+                                    if [ "$new_size" -gt 1073741824 ]; then
+                                        new_size_str="$(echo "scale=2; $new_size/1073741824" | bc) GB"
+                                    else
+                                        new_size_str="$(echo "scale=2; $new_size/1048576" | bc) MB"
+                                    fi
+                                    
+                                    if [ "$par2_total_size" -gt 1048576 ]; then
+                                        par2_size_str="$(echo "scale=2; $par2_total_size/1048576" | bc) MB"
+                                    else
+                                        par2_size_str="$(echo "scale=2; $par2_total_size/1024" | bc) KB"
+                                    fi
+                                    
+                                    log_progress "原始檔案: $original_size_str"
+                                    log_progress "壓縮檔案: $new_size_str (壓縮比: $ratio%)"
+                                    log_progress "PAR2修復檔: $par2_size_str (冗餘比: $par2_ratio%)"
+                                    log_success "檔案處理完成！包含完整冷儲存檔案組"
+                                    file_success=true
+                                    ((success_count++))
+                                else
+                                    log_error "PAR2 驗證失敗，保留臨時檔案供檢查"
+                                    ((error_count++))
+                                fi
                             else
-                                original_size_str="$(echo "scale=2; $original_size/1048576" | bc) MB"
+                                log_error "PAR2 修復檔案產生失敗"
+                                ((error_count++))
                             fi
-                            
-                            if [ "$new_size" -gt 1073741824 ]; then
-                                new_size_str="$(echo "scale=2; $new_size/1073741824" | bc) GB"
-                            else
-                                new_size_str="$(echo "scale=2; $new_size/1048576" | bc) MB"
-                            fi
-                            
-                            log_progress "原始檔案: $original_size_str"
-                            log_progress "新檔案: $new_size_str (壓縮比: $ratio%)"
-                            log_success "檔案處理完成！"
-                            file_success=true
-                            ((success_count++))
                         else
                             log_error "雙重雜湊驗證失敗，保留臨時檔案供檢查"
                             ((error_count++))
