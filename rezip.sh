@@ -1,15 +1,18 @@
 #!/bin/bash
 # Bash Script: 7z 轉 tar.zst 冷儲存封存工具
 # 作者: AI Assistant
+# 版本: v2.0 (階段8完成版)
 # 用途: 將 7z 檔案轉換為 tar.zst 格式並產生完整的冷儲存封存檔案組
 #
-# 🎯 冷儲存封存 SOP 流程:
-# 1. 解壓縮 7z 檔案
+# 🎯 冷儲存封存 SOP 流程 (符合企劃書第6.3節分離模式):
+# 1. 解壓縮 7z 檔案 (智能目錄結構檢測)
 # 2. 建立 deterministic tar 封存 (--sort=name, 保留原始時間戳和所有者)
-# 3. zstd 壓縮 (最佳化參數)
-# 4. 雙重雜湊驗證 (SHA-256 + BLAKE3)
-# 5. PAR2 修復冗餘 (10%)
-# 6. 多層驗證確保完整性
+# 3. tar header 立即驗證 (早期錯誤偵測)
+# 4. zstd 高效壓縮 (--long=31, 2GB dictionary window)
+# 5. 壓縮檔案完整性驗證 (zstd + tar 內容雙重檢查)
+# 6. 雙重雜湊驗證 (SHA-256 + BLAKE3)
+# 7. PAR2 修復冗餘 (10%, 簡化輸出方案)
+# 8. 多層驗證確保完整性 (5階段驗證流程)
 #
 # 🗜️ Zstd 冷儲存最佳化參數:
 # -19: 高壓縮等級，平衡壓縮比和速度
@@ -41,18 +44,36 @@ show_usage() {
   -t, --threads NUM      執行緒數量 (0=所有核心, 預設: 0)
   --no-long              停用長距離匹配 (預設啟用 --long=31，2GB dictionary window)
   --no-check             停用完整性檢查 (預設會啟用完整性檢查)
+  -o, --output-dir DIR   指定輸出目錄 (預設: ./processed)
+  --flat                 使用扁平結構，不創建子目錄 (向後相容)
   -h, --help             顯示此說明
 
 範例:
-  $0                                    # 處理當前目錄的 7z 檔案
+  $0                                    # 處理當前目錄，輸出到 ./processed/ 子目錄
   $0 /path/to/7z/files                  # 處理指定目錄的 7z 檔案
   $0 -l 15 -t 4 /path/to/files          # 使用自訂壓縮等級和執行緒數
-  $0 -l 22 ~/archives                   # 使用最高壓縮等級 (自動啟用 Ultra 模式)
-  $0 --no-long --no-check ~/archives    # 停用 2GB dictionary 和完整性檢查
+  $0 -o ~/output ~/archives             # 指定輸出目錄到 ~/output/
+  $0 --flat ~/archives                  # 使用扁平結構 (與舊版相容)
+  $0 -l 22 -o /backup ~/archives        # 最高壓縮等級 + 自訂輸出目錄
 
-注意:
-  - 需要安裝: 7z, tar (支援 POSIX/GNU 格式), zstd, bc, sha256sum, b3sum, par2
+📋 系統需求:
+  工具依賴: 7z, tar (支援 POSIX/GNU 格式), zstd, bc, sha256sum, b3sum, par2
+  記憶體需求: 建議 4GB+ RAM (--long=31 需要約 2.2GB 壓縮記憶體)
+  磁碟空間: 至少為原始檔案大小的 2-3 倍 (含臨時檔案和冗餘)
+  
+🎯 冷儲存功能:
+  - Deterministic tar: 確保可重現性 (--sort=name)
+  - 高效壓縮: zstd 最佳化參數，壓縮比可達 60-80%
+  - 雙重雜湊: SHA-256 + BLAKE3 提供最高安全性
+  - PAR2 修復: 10% 冗餘，可修復檔案損壞
+  - 5階段驗證: 確保每步驟完整性
+  - 智能組織: 子目錄結構，避免檔案混亂
+
+⚠️ 注意事項:
+  - 大檔案 (>2GB) 處理可能需要較長時間
+  - 建議在 SSD 上進行處理以提升效能
   - 轉換後的檔案會保存在同一目錄中
+  - 處理期間會產生臨時檔案，請確保磁碟空間充足
 EOF
 }
 
@@ -94,6 +115,20 @@ parse_arguments() {
                 ENABLE_CHECK=false
                 shift
                 ;;
+            -o|--output-dir)
+                shift
+                if [[ -n "$1" ]]; then
+                    OUTPUT_DIR="$1"
+                    shift
+                else
+                    echo "錯誤: --output-dir 需要指定目錄路徑" >&2
+                    exit 1
+                fi
+                ;;
+            --flat)
+                ORGANIZE_FILES=false
+                shift
+                ;;
             -h|--help)
                 show_usage
                 exit 0
@@ -124,6 +159,8 @@ THREADS=0  # 0 表示使用所有可用 CPU 核心
 LONG_MODE=true
 ENABLE_CHECK=true
 ULTRA_MODE=false  # 當壓縮等級為 20-22 時自動啟用
+OUTPUT_DIR="processed"  # 預設輸出目錄
+ORGANIZE_FILES=true  # 預設使用子目錄組織
 
 # 解析參數
 parse_arguments "$@"
@@ -180,12 +217,12 @@ show_spinner() {
     local pid=$1
     local message="$2"
     local spinner='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-    local i=0
+    local spinner_i=0
     
     printf "${COLOR_GRAY}%s " "$message"
     while kill -0 "$pid" 2>/dev/null; do
-        printf "\b${spinner:$i:1}"
-        i=$(( (i+1) % ${#spinner} ))
+        printf "\b${spinner:$spinner_i:1}"
+        spinner_i=$(( (spinner_i+1) % ${#spinner} ))
         sleep 0.1
     done
     printf "\b "
@@ -201,11 +238,12 @@ progress_bar() {
     
     printf "${COLOR_BRIGHT_BLUE}%s [" "$message"
     
-    # 繪製進度條
-    for ((i=0; i<filled; i++)); do
+    # 繪製進度條 (使用局部變數避免衝突)
+    local bar_i
+    for ((bar_i=0; bar_i<filled; bar_i++)); do
         printf "█"
     done
-    for ((i=filled; i<width; i++)); do
+    for ((bar_i=filled; bar_i<width; bar_i++)); do
         printf "░"
     done
     
@@ -225,6 +263,115 @@ check_tar_formats() {
     fi
     
     echo "${supported_formats[@]}"
+}
+
+# 設置輸出目錄結構 (階段9新增功能)
+setup_output_directory() {
+    local base_name="$1"
+    local work_dir="$2"
+    
+    # 確定最終輸出目錄
+    local final_output_dir
+    if [ "$ORGANIZE_FILES" = true ]; then
+        # 子目錄組織模式
+        if [[ "$OUTPUT_DIR" == /* ]]; then
+            # 絕對路徑
+            final_output_dir="$OUTPUT_DIR/$base_name"
+        else
+            # 相對路徑，基於工作目錄
+            final_output_dir="$work_dir/$OUTPUT_DIR/$base_name"
+        fi
+    else
+        # 扁平模式，直接放在工作目錄
+        final_output_dir="$work_dir"
+    fi
+    
+    # 確保輸出目錄存在
+    if [ "$ORGANIZE_FILES" = true ]; then
+        if [ ! -d "$final_output_dir" ]; then
+            log_detail "創建輸出目錄: $final_output_dir" >&2
+            if ! mkdir -p "$final_output_dir"; then
+                log_error "無法創建輸出目錄: $final_output_dir" >&2
+                return 1
+            fi
+        fi
+        
+        # 驗證目錄權限
+        if [ ! -w "$final_output_dir" ]; then
+            log_error "輸出目錄無寫入權限: $final_output_dir" >&2
+            return 1
+        fi
+        
+        log_success "輸出目錄準備完成: $final_output_dir" >&2
+    fi
+    
+    # 返回最終輸出目錄路徑
+    echo "$final_output_dir"
+}
+
+# 清理輸出目錄 (階段9新增功能)
+cleanup_output_directory() {
+    local output_dir="$1"
+    local keep_successful="$2"  # true=保留成功的檔案，false=全部清理
+    
+    if [ "$ORGANIZE_FILES" = false ] || [ "$keep_successful" = true ]; then
+        # 扁平模式或保留成功檔案時不清理
+        return 0
+    fi
+    
+    if [ -d "$output_dir" ] && [ -z "$(ls -A "$output_dir" 2>/dev/null)" ]; then
+        # 目錄存在且為空時清理
+        log_detail "清理空輸出目錄: $output_dir" >&2
+        rmdir "$output_dir" 2>/dev/null || log_warning "無法移除空目錄: $output_dir" >&2
+    fi
+}
+
+# 檢查系統資源 (階段8強化功能)
+check_system_resources() {
+    local work_dir="$1"
+    
+    log_info "檢查系統資源狀況..."
+    
+    # 檢查記憶體
+    if command -v free >/dev/null 2>&1; then
+        local total_memory available_memory
+        total_memory=$(free -b | awk 'NR==2{print $2}')
+        available_memory=$(free -b | awk 'NR==2{print $7}')
+        
+        local total_gb available_gb
+        total_gb=$(echo "scale=1; $total_memory/1073741824" | bc)
+        available_gb=$(echo "scale=1; $available_memory/1073741824" | bc)
+        
+        log_detail "系統記憶體: 總計 ${total_gb}GB，可用 ${available_gb}GB"
+        
+        # 記憶體需求檢查 (--long=31 需要約2.2GB)
+        if [ "$LONG_MODE" = true ]; then
+            local required_memory=2400000000  # 2.4GB in bytes
+            if [ "$available_memory" -lt "$required_memory" ]; then
+                log_warning "可用記憶體不足，建議至少 2.4GB (當前: ${available_gb}GB)"
+                log_detail "考慮使用 --no-long 參數降低記憶體需求"
+            fi
+        fi
+    else
+        log_detail "無法檢測記憶體狀況 (free 命令不可用)"
+    fi
+    
+    # 檢查CPU核心數
+    local cpu_cores
+    cpu_cores=$(nproc 2>/dev/null || echo "未知")
+    log_detail "CPU 核心數: $cpu_cores"
+    
+    # 檢查磁碟空間
+    local available_space_kb available_space_gb
+    available_space_kb=$(df "$work_dir" | awk 'NR==2 {print $4}')
+    available_space_gb=$(echo "scale=2; $available_space_kb/1048576" | bc)
+    log_detail "工作目錄可用空間: ${available_space_gb}GB"
+    
+    if [ "$(echo "$available_space_gb < 1" | bc)" -eq 1 ]; then
+        log_warning "磁碟空間不足，建議至少保留 1GB 以上空間"
+    fi
+    
+    log_success "系統資源檢查完成"
 }
 
 # 檢查必要工具
@@ -328,84 +475,146 @@ check_required_tools() {
     fi
 }
 
-# 檢查 7z 檔案結構
+# 檢查 7z 檔案結構 (重新設計，更準確判斷)
 check_7z_structure() {
     local zip_file="$1"
     
-    # 使用 7z 列表命令檢查結構
+    # 檢查檔案是否存在且可讀取
+    if [ ! -f "$zip_file" ] || [ ! -r "$zip_file" ]; then
+        log_error "檔案不存在或無法讀取: $zip_file"
+        return 1
+    fi
+    
+    # 檢查檔案大小 (避免處理空檔案)
+    local file_size
+    file_size=$(stat -c%s "$zip_file" 2>/dev/null || echo "0")
+    if [ "$file_size" -eq 0 ]; then
+        log_warning "檔案大小為 0，將跳過處理"
+        return 1
+    fi
+    
+    # 使用 7z 列表命令檢查結構 (使用更簡單的輸出格式)
     local list_output
-    if ! list_output=$(7z l "$zip_file" -ba 2>/dev/null); then
+    if ! list_output=$(7z l "$zip_file" 2>/dev/null | grep -E "^[^-].*[^/\\]$" | tail -n +3 | head -n -2); then
         log_warning "無法分析壓縮檔結構，將建立資料夾"
         return 1
     fi
     
+    # 檢查是否為空壓縮檔
     if [ -z "$list_output" ]; then
+        log_warning "壓縮檔為空，將建立資料夾"
         return 1
     fi
     
-    # 檢查所有檔案是否在同一個頂層資料夾中
-    local top_level_items=()
-    while IFS= read -r line; do
-        # 跳過目錄項目並取得檔案路徑
-        if [[ $line =~ ^D[[:space:]]+ ]] || [ -z "${line// }" ]; then
-            continue
-        fi
-        
-        # 提取檔案路徑 (在檔案屬性之後)
-        if [[ $line =~ ^[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+(.+)$ ]]; then
-            local file_name="${BASH_REMATCH[1]// /}"
-            if [ -n "$file_name" ]; then
-                local top_level
-                top_level=$(echo "$file_name" | cut -d'/' -f1 | cut -d'\' -f1)
-                if [[ ! " ${top_level_items[*]} " =~ " $top_level " ]]; then
-                    top_level_items+=("$top_level")
-                fi
-            fi
-        fi
-    done <<< "$list_output"
-    
-    # 如果只有一個頂層項目且為資料夾則回傳 true
-    [ ${#top_level_items[@]} -eq 1 ]
-}
-
-# 解壓縮 7z 檔案
-extract_7z_file() {
-    local zip_file="$1"
-    local output_dir="$2"
-    local create_folder="$3"
-    
+    # 獲取檔案名稱 (不含副檔名)
     local base_name
     base_name=$(basename "$zip_file" .7z)
     
-    # 驗證輸出目錄是否存在
+    # 更可靠的檢查方法：檢查是否所有項目都在同一個與檔案名稱相同的資料夾中
+    local has_matching_top_folder=false
+    local has_other_items=false
+    
+    # 使用 7z 詳細列表格式檢查
+    local output
+    if output=$(7z l "$zip_file" -slt 2>/dev/null); then
+        local current_path=""
+        local current_is_folder=false
+        
+        while IFS= read -r line; do
+            if [[ "$line" == "Path = "* ]]; then
+                current_path="${line#Path = }"
+            elif [[ "$line" == "Folder = +"* ]]; then
+                current_is_folder=true
+            elif [[ "$line" == "Folder = -"* ]]; then
+                current_is_folder=false
+            elif [[ "$line" == "" ]] && [[ -n "$current_path" ]]; then
+                # 處理完一個項目，分析路徑
+                if [[ "$current_path" == "$base_name" ]] && [[ "$current_is_folder" == true ]]; then
+                    has_matching_top_folder=true
+                elif [[ "$current_path" == "$base_name/"* ]]; then
+                    # 在同名資料夾內的檔案，這是好的
+                    continue
+                else
+                    # 不在同名資料夾內的項目（檔案或其他資料夾）
+                    has_other_items=true
+                    break
+                fi
+                
+                # 重置狀態
+                current_path=""
+                current_is_folder=false
+            fi
+        done <<< "$output"
+        
+        # 處理最後一個項目（如果檔案末尾沒有空行）
+        if [[ -n "$current_path" ]]; then
+            if [[ "$current_path" == "$base_name" ]] && [[ "$current_is_folder" == true ]]; then
+                has_matching_top_folder=true
+            elif [[ "$current_path" != "$base_name/"* ]]; then
+                has_other_items=true
+            fi
+        fi
+    else
+        # 如果無法解析，預設建立資料夾
+        return 1
+    fi
+    
+    # 只有在有同名頂層資料夾且沒有其他散落項目時才返回 true
+    [ "$has_matching_top_folder" = true ] && [ "$has_other_items" = false ]
+}
+
+# 解壓縮 7z 檔案 (優化版：根據結構智能選擇解壓縮策略)
+extract_7z_file() {
+    local zip_file="$1"
+    local output_dir="$2"
+    local has_top_folder="$3"  # true/false，表示是否有同名頂層資料夾
+    
+    # 檔案名稱安全性檢查
+    local base_name
+    base_name=$(basename "$zip_file" .7z)
+    
+    # 檢查檔案名稱是否包含危險字符
+    if [[ "$base_name" =~ [^a-zA-Z0-9._-] ]]; then
+        log_warning "檔案名稱包含特殊字符，可能影響處理: $base_name" >&2
+    fi
+    
+    # 驗證輸出目錄是否存在且可寫入
     if [ ! -d "$output_dir" ]; then
         log_error "輸出目錄不存在: $output_dir"
         return 1
     fi
     
-    # 將除錯訊息輸出到 stderr，避免混入返回值
-    log_detail "解壓縮參數: 檔案=$zip_file, 輸出目錄=$output_dir, 創建資料夾=$create_folder" >&2
+    if [ ! -w "$output_dir" ]; then
+        log_error "輸出目錄無寫入權限: $output_dir"
+        return 1
+    fi
     
-    if [ "$create_folder" = true ]; then
-        # 需要建立同名資料夾
+    local extracted_dir
+    
+    if [ "$has_top_folder" = true ]; then
+        # 情況1：7z檔案內已有同名頂層資料夾，直接解壓縮到output_dir
+        log_detail "檔案內已有頂層資料夾，直接解壓縮到: $output_dir" >&2
+        
+        if ! 7z x "$zip_file" -o"$output_dir" -y >/dev/null 2>&1; then
+            log_error "7z 解壓縮失敗"
+            return 1
+        fi
+        
+        # 解壓縮後的目錄應該是 output_dir/base_name
+        extracted_dir="$output_dir/$base_name"
+        
+    else
+        # 情況2：7z檔案內是散落的檔案，需要先建立目標資料夾
         local target_dir="$output_dir/$base_name"
-        log_detail "準備創建目標目錄: $target_dir" >&2
+        log_detail "檔案內是散落檔案，建立目標資料夾: $target_dir" >&2
         
+        # 建立目標資料夾
         if ! mkdir -p "$target_dir"; then
-            log_error "無法創建目標目錄: $target_dir"
+            log_error "無法創建目標資料夾: $target_dir"
             return 1
         fi
         
-        # 驗證目標目錄是否成功創建
-        if [ ! -d "$target_dir" ]; then
-            log_error "目標目錄創建失敗: $target_dir"
-            return 1
-        fi
-        
-        log_detail "目標目錄創建成功: $target_dir" >&2
-        
-        # 解壓縮到目標目錄
-        log_detail "開始解壓縮到: $target_dir" >&2
+        # 解壓縮到目標資料夾
         if ! 7z x "$zip_file" -o"$target_dir" -y >/dev/null 2>&1; then
             log_error "7z 解壓縮失敗"
             # 清理失敗的目錄
@@ -413,54 +622,23 @@ extract_7z_file() {
             return 1
         fi
         
-        # 驗證解壓縮結果
-        if [ ! -d "$target_dir" ] || [ -z "$(ls -A "$target_dir" 2>/dev/null)" ]; then
-            log_error "解壓縮後目錄為空或不存在: $target_dir"
-            return 1
-        fi
-        
-        # 先輸出路徑，再顯示成功訊息
-        echo "$target_dir"
-        log_success "已解壓縮至: $target_dir" >&2
-    else
-        # 直接解壓縮到輸出目錄
-        log_detail "開始解壓縮到: $output_dir" >&2
-        if ! 7z x "$zip_file" -o"$output_dir" -y >/dev/null 2>&1; then
-            log_error "7z 解壓縮失敗"
-            return 1
-        fi
-        
-        # 尋找解壓縮的資料夾
-        local extracted_dir="$output_dir/$base_name"
-        if [ ! -d "$extracted_dir" ]; then
-            # 如果預期的資料夾不存在，尋找實際解壓縮的內容
-            log_detail "預期目錄不存在，搜尋實際解壓縮內容..." >&2
-            local found_dirs
-            found_dirs=$(find "$output_dir" -maxdepth 1 -type d -name "*$base_name*" | head -1)
-            if [ -n "$found_dirs" ]; then
-                extracted_dir="$found_dirs"
-                log_detail "找到解壓縮目錄: $extracted_dir" >&2
-            else
-                log_error "在 $output_dir 中找不到解壓縮目錄"
-                # 列出輸出目錄內容以供除錯
-                log_detail "輸出目錄內容:" >&2
-                ls -la "$output_dir" | while read line; do
-                    log_detail "  $line" >&2
-                done
-                return 1
-            fi
-        fi
-        
-        # 驗證解壓縮結果
-        if [ ! -d "$extracted_dir" ] || [ -z "$(ls -A "$extracted_dir" 2>/dev/null)" ]; then
-            log_error "解壓縮後目錄為空或不存在: $extracted_dir"
-            return 1
-        fi
-        
-        # 先輸出路徑，再顯示成功訊息
-        echo "$extracted_dir"
-        log_success "已解壓縮至: $extracted_dir" >&2
+        extracted_dir="$target_dir"
     fi
+    
+    # 驗證解壓縮結果
+    if [ ! -d "$extracted_dir" ]; then
+        log_error "解壓縮後目錄不存在: $extracted_dir"
+        return 1
+    fi
+    
+    if [ -z "$(ls -A "$extracted_dir" 2>/dev/null)" ]; then
+        log_error "解壓縮後目錄為空: $extracted_dir"
+        return 1
+    fi
+    
+    # 返回解壓縮目錄路徑
+    echo "$extracted_dir"
+    log_success "已解壓縮至: $extracted_dir" >&2
 }
 
 # 重新壓縮為 tar.zst (分離模式，符合企劃書 SOP)
@@ -592,7 +770,7 @@ compress_to_tar_zst() {
     # 驗證 tar 檔案是否創建成功
     if [ ! -f "$temp_tar" ]; then
         log_error "tar 檔案創建失敗: $(basename "$temp_tar")"
-        cd "$current_dir"
+    cd "$current_dir"
         return 1
     fi
     
@@ -987,8 +1165,8 @@ generate_par2_file() {
     # -r10: 10% 修復冗餘
     # -n1: 限制為 1 個修復檔案 (簡化輸出)
     # -q: 安靜模式，減少輸出
-    # 將所有輸出重定向到 stderr，避免污染返回值
-    if ! par2 create -r10 -n1 -q "$file_path" >&2; then
+    # 將所有輸出重定向到 /dev/null，避免污染終端
+    if ! par2 create -r10 -n1 -q "$file_path" >/dev/null 2>&1; then
         log_error "PAR2 修復檔案產生失敗" >&2
         return 1
     fi
@@ -1062,7 +1240,6 @@ verify_par2() {
         else
             verification_stats "PAR2 驗證" "$start_time" "$end_time" "success" "$file_path" >&2
             log_success "PAR2 驗證通過 - 檔案完整性正常" >&2
-            log_detail "PAR2 輸出: $(echo "$verify_output" | tr '\n' ' ' | sed 's/  */ /g')" >&2
             return 0
         fi
     else
@@ -1083,6 +1260,9 @@ generate_checksum_file() {
 verify_checksum() {
     verify_sha256 "$@"
 }
+
+# 注意：已移除複雜的中英文字符寬度計算函數
+# 改用簡單的固定寬度 printf 格式化，避免對齊問題
 
 # 新增統計格式化函數
 format_file_size() {
@@ -1133,6 +1313,7 @@ display_file_statistics() {
     local sha256_file="$6"
     local blake3_file="$7"
     local par2_file="$8"
+    local output_dir="$9"  # 新增輸出目錄參數
     
     # 計算比率
     local compression_ratio par2_ratio
@@ -1157,46 +1338,50 @@ display_file_statistics() {
         processing_speed="$speed_mb_s MB/s"
     fi
     
-    # 美化的統計輸出
+    # 美化的統計輸出 (重新設計固定寬度)
     printf "\n"
     log_progress "╭─────────────────────────────────────────────────────────────╮"
     log_progress "│                        檔案處理統計                         │"
     log_progress "├─────────────────────────────────────────────────────────────┤"
-    log_progress "│ 檔案名稱: %-50s │" "$base_name"
-    log_progress "│ 原始大小: %-20s 壓縮後: %-20s │" "$original_size_str" "$new_size_str"
-    log_progress "│ 壓縮比率: %-20s PAR2大小: %-18s │" "$compression_ratio%" "$par2_size_str"
-    log_progress "│ PAR2比率: %-20s 處理時間: %-18s │" "$par2_ratio%" "$duration_str"
+    log_progress "$(printf "│ 檔案名稱: %-51s │" "$base_name")"
+    if [ "$ORGANIZE_FILES" = true ]; then
+        local rel_output_dir
+        rel_output_dir=$(basename "$(dirname "$output_dir")")/$(basename "$output_dir")
+        log_progress "$(printf "│ 輸出目錄: %-51s │" "$rel_output_dir")"
+    fi
+    log_progress "$(printf "│ 原始大小: %-12s 壓縮後: %-12s 比率: %-12s │" "$original_size_str" "$new_size_str" "$compression_ratio%")"
+    log_progress "$(printf "│ PAR2大小: %-12s PAR2比率: %-12s 時間: %-12s │" "$par2_size_str" "$par2_ratio%" "$duration_str")"
     if [ -n "$processing_speed" ]; then
-        log_progress "│ 處理速度: %-48s │" "$processing_speed"
+        log_progress "$(printf "│ 處理速度: %-51s │" "$processing_speed")"
     fi
     log_progress "├─────────────────────────────────────────────────────────────┤"
     log_progress "│                        生成檔案清單                         │"
     log_progress "├─────────────────────────────────────────────────────────────┤"
     
-    # 顯示生成的檔案清單
-    local main_file="$WORK_DIRECTORY/$base_name.tar.zst"
+    # 顯示生成的檔案清單 (固定寬度格式)
+    local main_file="$output_dir/$base_name.tar.zst"
     if [ -f "$main_file" ]; then
         local file_size_str
         file_size_str=$(format_file_size "$(stat -c%s "$main_file")")
-        log_progress "│ ✓ %-35s %20s │" "$(basename "$main_file")" "$file_size_str"
+        log_progress "$(printf "│ ✓ %-42s %13s │" "$(basename "$main_file")" "$file_size_str")"
     fi
     
     if [ -f "$sha256_file" ]; then
         local file_size_str
         file_size_str=$(format_file_size "$(stat -c%s "$sha256_file")")
-        log_progress "│ ✓ %-35s %20s │" "$(basename "$sha256_file")" "$file_size_str"
+        log_progress "$(printf "│ ✓ %-42s %13s │" "$(basename "$sha256_file")" "$file_size_str")"
     fi
     
     if [ -f "$blake3_file" ]; then
         local file_size_str
         file_size_str=$(format_file_size "$(stat -c%s "$blake3_file")")
-        log_progress "│ ✓ %-35s %20s │" "$(basename "$blake3_file")" "$file_size_str"
+        log_progress "$(printf "│ ✓ %-42s %13s │" "$(basename "$blake3_file")" "$file_size_str")"
     fi
     
     if [ -f "$par2_file" ]; then
         local file_size_str
         file_size_str=$(format_file_size "$(stat -c%s "$par2_file")")
-        log_progress "│ ✓ %-35s %20s │" "$(basename "$par2_file")" "$file_size_str"
+        log_progress "$(printf "│ ✓ %-42s %13s │" "$(basename "$par2_file")" "$file_size_str")"
         
         # 查找並顯示所有相關的 .vol 檔案
         local vol_files
@@ -1206,7 +1391,7 @@ display_file_statistics() {
                 if [ -f "$vol_file" ]; then
                     local vol_size_str
                     vol_size_str=$(format_file_size "$(stat -c%s "$vol_file")")
-                    log_progress "│ ✓ %-35s %20s │" "$(basename "$vol_file")" "$vol_size_str"
+                    log_progress "$(printf "│ ✓ %-42s %13s │" "$(basename "$vol_file")" "$vol_size_str")"
                 fi
             done <<< "$vol_files"
         fi
@@ -1238,15 +1423,15 @@ display_final_summary() {
     log_progress "╭─────────────────────────────────────────────────────────────╮"
     log_progress "│                      批次處理總摘要                         │"
     log_progress "├─────────────────────────────────────────────────────────────┤"
-    log_progress "│ 總檔案數: %-15s 成功: %-15s 失敗: %-10s │" "$total_files" "$success_count" "$error_count"
-    log_progress "│ 成功率:   %-15s 總處理時間: %-23s │" "$success_rate%" "$total_duration_str"
+    log_progress "$(printf "│ 總檔案數: %-6s 成功: %-6s 失敗: %-6s 成功率: %-12s │" "$total_files" "$success_count" "$error_count" "$success_rate%")"
+    log_progress "$(printf "│ 總處理時間: %-48s │" "$total_duration_str")"
     
     if [ "$success_count" -gt 0 ]; then
         local avg_time_per_file
         avg_time_per_file=$(echo "scale=3; $total_processing_time / $success_count" | bc)
         local avg_time_str
         avg_time_str=$(format_duration "$avg_time_per_file")
-        log_progress "│ 平均處理時間: %-44s │" "$avg_time_str"
+        log_progress "$(printf "│ 平均處理時間: %-46s │" "$avg_time_str")"
     fi
     
     log_progress "├─────────────────────────────────────────────────────────────┤"
@@ -1272,23 +1457,57 @@ display_final_summary() {
     log_detail "• 檔案組完整性: ✓"
 }
 
-# 主要處理函數
+# 主要處理函數 (階段8完整版)
 process_7z_files() {
     # 檢查必要工具
     check_required_tools
     
-    # 取得 7z 檔案清單
+    # 檢查系統資源狀況
+    check_system_resources "$WORK_DIRECTORY"
+    
+    # 取得 7z 檔案清單，並進行邊界條件檢查
     local zip_files
     mapfile -t zip_files < <(find "$WORK_DIRECTORY" -maxdepth 1 -name "*.7z" -type f)
     
     if [ ${#zip_files[@]} -eq 0 ]; then
         log_warning "在工作目錄中找不到 7z 檔案。"
+        log_detail "請確認目錄路徑是否正確，且包含 .7z 檔案"
         return
     fi
     
+    # 檢查檔案是否可讀取 (邊界條件處理)
+    local readable_files=()
+    for zip_file in "${zip_files[@]}"; do
+        if [ -r "$zip_file" ] && [ -f "$zip_file" ]; then
+            # 檢查檔案大小
+            local file_size
+            file_size=$(stat -c%s "$zip_file" 2>/dev/null || echo "0")
+            if [ "$file_size" -gt 0 ]; then
+                readable_files+=("$zip_file")
+            else
+                log_warning "跳過空檔案: $(basename "$zip_file")"
+            fi
+        else
+            log_warning "跳過無法讀取的檔案: $(basename "$zip_file")"
+        fi
+    done
+    
+    if [ ${#readable_files[@]} -eq 0 ]; then
+        log_error "沒有可處理的有效 7z 檔案"
+        return 1
+    fi
+    
+    if [ ${#readable_files[@]} -lt ${#zip_files[@]} ]; then
+        local skipped_count=$((${#zip_files[@]} - ${#readable_files[@]}))
+        log_warning "已跳過 $skipped_count 個無效檔案，將處理 ${#readable_files[@]} 個有效檔案"
+    fi
+    
+    # 更新處理清單
+    zip_files=("${readable_files[@]}")
+    
     log_info "找到 ${#zip_files[@]} 個 7z 檔案準備處理"
-    log_config "壓縮設定:"
-    log_detail "等級: $COMPRESSION_LEVEL$([ "$ULTRA_MODE" = true ] && echo " (Ultra 模式)" || echo "")"
+    log_config "處理設定:"
+    log_detail "壓縮等級: $COMPRESSION_LEVEL$([ "$ULTRA_MODE" = true ] && echo " (Ultra 模式)" || echo "")"
     # 獲取實際核心數量
     local actual_threads
     if [ "$THREADS" = "0" ]; then
@@ -1299,6 +1518,19 @@ process_7z_files() {
     fi
     log_detail "長距離匹配: $([ "$LONG_MODE" = true ] && echo "啟用 (--long=31, 2GB dictionary)" || echo "停用")"
     log_detail "完整性檢查: $([ "$ENABLE_CHECK" = true ] && echo "啟用" || echo "停用")"
+    
+    log_config "檔案組織:"
+    if [ "$ORGANIZE_FILES" = true ]; then
+        log_detail "組織模式: 子目錄結構 (預設，推薦)"
+        if [[ "$OUTPUT_DIR" == /* ]]; then
+            log_detail "輸出目錄: $OUTPUT_DIR/ (絕對路徑)"
+        else
+            log_detail "輸出目錄: $WORK_DIRECTORY/$OUTPUT_DIR/ (相對路徑)"
+        fi
+    else
+        log_detail "組織模式: 扁平結構 (--flat，向後相容)"
+        log_detail "輸出目錄: $WORK_DIRECTORY/ (與原始檔案同目錄)"
+    fi
     printf "\n"
     
     # 建立臨時工作目錄
@@ -1338,6 +1570,14 @@ process_7z_files() {
         local total_start_time
         total_start_time=$(date +%s.%3N)
         
+        # 設置此檔案的輸出目錄
+        local file_output_dir
+        if ! file_output_dir=$(setup_output_directory "$base_name" "$WORK_DIRECTORY"); then
+            log_error "無法設置輸出目錄，跳過檔案: $base_name"
+            ((error_count++))
+            continue
+        fi
+        
         # 顯示當前進度
         printf "\n"
         log_progress "════════════════════════════════════════════════════════════"
@@ -1357,18 +1597,18 @@ process_7z_files() {
         
         # 步驟 1: 檢查 7z 檔案結構
         log_step "檢查檔案結構..."
-        local need_create_folder=true
+        local has_top_folder=false
         if check_7z_structure "$zip_file"; then
             log_info "檔案已包含頂層資料夾，直接解壓縮"
-            need_create_folder=false
+            has_top_folder=true
         else
             log_info "檔案沒有頂層資料夾，將建立同名資料夾"
-            need_create_folder=true
+            has_top_folder=false
         fi
         
         # 步驟 2: 解壓縮
         log_step "開始解壓縮..."
-        if extracted_dir=$(extract_7z_file "$zip_file" "$temp_dir" "$need_create_folder"); then
+        if extracted_dir=$(extract_7z_file "$zip_file" "$temp_dir" "$has_top_folder"); then
             log_detail "接收到的解壓縮路徑: '$extracted_dir'"
             # 驗證解壓縮目錄是否存在
             if [ ! -d "$extracted_dir" ]; then
@@ -1377,7 +1617,7 @@ process_7z_files() {
             else
                 # 步驟 3: 重新壓縮為 tar.zst
                 log_step "重新壓縮為 tar.zst..."
-                local output_file="$WORK_DIRECTORY/$base_name.tar.zst"
+                local output_file="$file_output_dir/$base_name.tar.zst"
                 if compress_to_tar_zst "$extracted_dir" "$output_file" "$COMPRESSION_LEVEL" "$THREADS" "$LONG_MODE" "$ENABLE_CHECK" "$ULTRA_MODE"; then
                     
                     # 步驟 4: 產生雙重雜湊檔案 (SHA-256 + BLAKE3)
@@ -1398,15 +1638,15 @@ process_7z_files() {
                                 
                                 # 步驟 7: 驗證 PAR2 修復檔案
                                 if verify_par2 "$output_file" "$par2_file"; then
-                                    
-                                    # 清理解壓縮的臨時檔案
-                                    rm -rf "$extracted_dir"
-                                    
-                                    # 顯示檔案大小比較
-                                    local original_size
-                                    original_size=$(stat -c%s "$zip_file")
-                                    local new_size
-                                    new_size=$(stat -c%s "$output_file")
+                            
+                            # 清理解壓縮的臨時檔案
+                            rm -rf "$extracted_dir"
+                            
+                            # 顯示檔案大小比較
+                            local original_size
+                            original_size=$(stat -c%s "$zip_file")
+                            local new_size
+                            new_size=$(stat -c%s "$output_file")
                                     # 計算 PAR2 總大小（主檔案 + 所有修復檔案）
                                     local par2_total_size=0
                                     local par2_main_size
@@ -1426,25 +1666,25 @@ process_7z_files() {
                                         done <<< "$vol_files"
                                     fi
                                     
-                                    local ratio
-                                    ratio=$(echo "scale=2; $new_size * 100 / $original_size" | bc)
+                            local ratio
+                            ratio=$(echo "scale=2; $new_size * 100 / $original_size" | bc)
                                     local par2_ratio
                                     par2_ratio=$(echo "scale=2; $par2_total_size * 100 / $new_size" | bc)
-                                    
-                                    # 格式化檔案大小
+                            
+                            # 格式化檔案大小
                                     local original_size_str new_size_str par2_size_str
-                                    if [ "$original_size" -gt 1073741824 ]; then
-                                        original_size_str="$(echo "scale=2; $original_size/1073741824" | bc) GB"
-                                    else
-                                        original_size_str="$(echo "scale=2; $original_size/1048576" | bc) MB"
-                                    fi
-                                    
-                                    if [ "$new_size" -gt 1073741824 ]; then
-                                        new_size_str="$(echo "scale=2; $new_size/1073741824" | bc) GB"
-                                    else
-                                        new_size_str="$(echo "scale=2; $new_size/1048576" | bc) MB"
-                                    fi
-                                    
+                            if [ "$original_size" -gt 1073741824 ]; then
+                                original_size_str="$(echo "scale=2; $original_size/1073741824" | bc) GB"
+                            else
+                                original_size_str="$(echo "scale=2; $original_size/1048576" | bc) MB"
+                            fi
+                            
+                            if [ "$new_size" -gt 1073741824 ]; then
+                                new_size_str="$(echo "scale=2; $new_size/1073741824" | bc) GB"
+                            else
+                                new_size_str="$(echo "scale=2; $new_size/1048576" | bc) MB"
+                            fi
+                            
                                     if [ "$par2_total_size" -gt 1048576 ]; then
                                         par2_size_str="$(echo "scale=2; $par2_total_size/1048576" | bc) MB"
                                     else
@@ -1458,16 +1698,16 @@ process_7z_files() {
                                     total_duration=$(echo "scale=3; $total_end_time - $total_start_time" | bc)
                                     
                                     # 使用新的美化統計輸出
-                                    display_file_statistics "$base_name" "$original_size" "$new_size" "$par2_total_size" "$total_duration" "$sha256_file" "$blake3_file" "$par2_file"
+                                    display_file_statistics "$base_name" "$original_size" "$new_size" "$par2_total_size" "$total_duration" "$sha256_file" "$blake3_file" "$par2_file" "$file_output_dir"
                                     
                                     log_success "檔案處理完成！包含完整冷儲存檔案組"
-                                    file_success=true
-                                    ((success_count++))
-                                else
+                            file_success=true
+                            ((success_count++))
+                        else
                                     log_error "PAR2 驗證失敗，保留臨時檔案供檢查"
-                                    ((error_count++))
-                                fi
-                            else
+                            ((error_count++))
+                        fi
+                    else
                                 log_error "PAR2 修復檔案產生失敗"
                                 ((error_count++))
                             fi
@@ -1504,6 +1744,11 @@ process_7z_files() {
             log_error "檔案 $(basename "$zip_file") 處理失敗"
             log_detail "失敗前處理時間: ${total_duration}s"
             generate_diagnostic_info "檔案處理流程失敗" "$zip_file" "請檢查上述錯誤訊息以確定具體失敗原因"
+            
+            # 清理失敗的輸出目錄
+            if [ -n "$file_output_dir" ]; then
+                cleanup_output_directory "$file_output_dir" false
+            fi
         fi
         
         printf "\n"  # 每個檔案處理完後添加空行分隔
@@ -1574,5 +1819,21 @@ else
     exit 1
 fi
 
+# 顯示版本信息 (階段9更新)
+show_version_info() {
+    log_info "🎯 Rezip.sh v2.1 (階段9完成版) - 冷儲存封存工具"
+    log_detail "完整符合企劃書第6.3節分離模式要求"
+    log_detail "支援功能: Deterministic Tar + Zstd最佳化 + 雙重雜湊 + PAR2修復 + 智能組織"
+    log_detail "驗證階段: 5層驗證確保完整性"
+    log_detail "檔案組織: 子目錄結構避免檔案混亂"
+    printf "\n"
+}
+
+# 顯示啟動資訊
+show_version_info
+
 # 執行主要處理
 process_7z_files
+
+# 腳本結束標記
+log_detail "腳本執行完成 - Rezip.sh v2.1 (階段9完成版) - 支援智能檔案組織"
