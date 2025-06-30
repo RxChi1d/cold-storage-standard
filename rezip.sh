@@ -648,21 +648,39 @@ compress_to_tar_zst() {
     fi
     
     # 4a. zstd 完整性檢查
+    local zstd_verify_start
+    zstd_verify_start=$(date +%s.%3N)
     if ! zstd -tq "${verify_params[@]}" "$output_file"; then
+        local zstd_verify_end
+        zstd_verify_end=$(date +%s.%3N)
+        verification_stats "zstd 完整性驗證" "$zstd_verify_start" "$zstd_verify_end" "failure" "$output_file" >&2
         log_error "zstd 完整性驗證失敗"
+        generate_diagnostic_info "zstd 壓縮檔案損壞" "$output_file" "可能的記憶體不足或磁碟空間問題" >&2
         rm -f "$temp_tar" "$output_file"
         cd "$current_dir"
         return 1
     fi
+    local zstd_verify_end
+    zstd_verify_end=$(date +%s.%3N)
+    verification_stats "zstd 完整性驗證" "$zstd_verify_start" "$zstd_verify_end" "success" "$output_file" >&2
     log_detail "zstd 完整性驗證通過" >&2
     
     # 4b. 解壓縮後 tar 內容驗證
+    local tar_content_start
+    tar_content_start=$(date +%s.%3N)
     if ! zstd -dc "${verify_params[@]}" "$output_file" | tar -tvf - > /dev/null 2>&1; then
+        local tar_content_end
+        tar_content_end=$(date +%s.%3N)
+        verification_stats "tar 內容驗證" "$tar_content_start" "$tar_content_end" "failure" "$output_file" >&2
         log_error "解壓縮後 tar 內容驗證失敗"
+        generate_diagnostic_info "tar 內容結構損壞" "$output_file" "可能的 tar 創建過程錯誤或壓縮損壞" >&2
         rm -f "$temp_tar" "$output_file"
         cd "$current_dir"
         return 1
     fi
+    local tar_content_end
+    tar_content_end=$(date +%s.%3N)
+    verification_stats "tar 內容驗證" "$tar_content_start" "$tar_content_end" "success" "$output_file" >&2
     log_detail "解壓縮後 tar 內容驗證通過" >&2
     log_success "壓縮檔案完整性驗證通過" >&2
     
@@ -717,40 +735,148 @@ generate_blake3_file() {
     log_success "BLAKE3 雜湊檔案已產生: $checksum_file" >&2
 }
 
-# 驗證 SHA256 校驗和檔案
+# 驗證統計函數 - 記錄驗證時間和結果
+verification_stats() {
+    local stage_name="$1"
+    local start_time="$2"
+    local end_time="$3"
+    local status="$4"
+    local file_path="$5"
+    
+    local duration
+    duration=$(echo "scale=3; $end_time - $start_time" | bc)
+    
+    if [ "$status" = "success" ]; then
+        log_detail "✓ $stage_name 完成：耗時 ${duration}s" >&2
+    else
+        log_detail "✗ $stage_name 失敗：耗時 ${duration}s" >&2
+    fi
+    
+    # 如果有檔案路徑，顯示檔案大小資訊
+    if [ -n "$file_path" ] && [ -f "$file_path" ]; then
+        local file_size
+        file_size=$(stat -c%s "$file_path")
+        local file_size_str
+        if [ "$file_size" -gt 1073741824 ]; then
+            file_size_str="$(echo "scale=2; $file_size/1073741824" | bc) GB"
+        else
+            file_size_str="$(echo "scale=2; $file_size/1048576" | bc) MB"
+        fi
+        local speed
+        if [ "$duration" != "0" ] && [ "$duration" != "0.000" ]; then
+            speed=$(echo "scale=2; $file_size/1048576/$duration" | bc)
+            log_detail "  檔案大小：$file_size_str，處理速度：${speed} MB/s" >&2
+        else
+            log_detail "  檔案大小：$file_size_str" >&2
+        fi
+    fi
+}
+
+# 進階診斷資訊函數
+generate_diagnostic_info() {
+    local error_type="$1"
+    local file_path="$2"
+    local additional_info="$3"
+    
+    log_error "=== 診斷資訊 ==="
+    log_detail "錯誤類型：$error_type"
+    log_detail "時間戳記：$(date '+%Y-%m-%d %H:%M:%S')"
+    
+    if [ -n "$file_path" ]; then
+        log_detail "問題檔案：$file_path"
+        if [ -f "$file_path" ]; then
+            local file_size
+            file_size=$(stat -c%s "$file_path")
+            local file_size_str
+            if [ "$file_size" -gt 1073741824 ]; then
+                file_size_str="$(echo "scale=2; $file_size/1073741824" | bc) GB"
+            else
+                file_size_str="$(echo "scale=2; $file_size/1048576" | bc) MB"
+            fi
+            log_detail "檔案大小：$file_size_str"
+            log_detail "檔案權限：$(ls -la "$file_path" | awk '{print $1}')"
+        else
+            log_detail "檔案狀態：檔案不存在或無法存取"
+        fi
+    fi
+    
+    # 系統資源資訊
+    local available_space
+    available_space=$(df "$(dirname "${file_path:-$PWD}")" 2>/dev/null | awk 'NR==2 {print $4*1024}' || echo "未知")
+    if [ "$available_space" != "未知" ]; then
+        local space_gb
+        space_gb=$(echo "scale=2; $available_space/1073741824" | bc)
+        log_detail "可用磁碟空間：${space_gb} GB"
+    fi
+    
+    local memory_info
+    if command -v free >/dev/null 2>&1; then
+        memory_info=$(free -h | awk 'NR==2{print $7}')
+        log_detail "可用記憶體：$memory_info"
+    fi
+    
+    if [ -n "$additional_info" ]; then
+        log_detail "額外資訊：$additional_info"
+    fi
+    
+    log_detail "建議動作：檢查磁碟空間、記憶體狀況和檔案權限"
+    log_error "=== 診斷結束 ==="
+}
+
+# 驗證 SHA256 校驗和檔案 (強化版)
 verify_sha256() {
     local file_path="$1"
     local checksum_file="$2"
+    local start_time
+    start_time=$(date +%s.%3N)
     
     local expected_hash
     expected_hash=$(cut -d' ' -f1 "$checksum_file")
     local actual_hash
     actual_hash=$(sha256sum "$file_path" | cut -d' ' -f1)
     
+    local end_time
+    end_time=$(date +%s.%3N)
+    
     if [ "$expected_hash" = "$actual_hash" ]; then
+        verification_stats "SHA256 驗證" "$start_time" "$end_time" "success" "$file_path"
         log_success "SHA256 雜湊驗證通過"
         return 0
     else
-        log_error "SHA256 雜湊驗證失敗！預期: $expected_hash，實際: $actual_hash"
+        verification_stats "SHA256 驗證" "$start_time" "$end_time" "failure" "$file_path"
+        log_error "SHA256 雜湊驗證失敗！"
+        log_detail "預期雜湊：$expected_hash"
+        log_detail "實際雜湊：$actual_hash"
+        generate_diagnostic_info "SHA256 雜湊不符" "$file_path" "可能的檔案損壞或傳輸錯誤"
         return 1
     fi
 }
 
-# 驗證 BLAKE3 雜湊檔案
+# 驗證 BLAKE3 雜湊檔案 (強化版)
 verify_blake3() {
     local file_path="$1"
     local checksum_file="$2"
+    local start_time
+    start_time=$(date +%s.%3N)
     
     local expected_hash
     expected_hash=$(cut -d' ' -f1 "$checksum_file")
     local actual_hash
     actual_hash=$(b3sum "$file_path" | cut -d' ' -f1)
     
+    local end_time
+    end_time=$(date +%s.%3N)
+    
     if [ "$expected_hash" = "$actual_hash" ]; then
+        verification_stats "BLAKE3 驗證" "$start_time" "$end_time" "success" "$file_path"
         log_success "BLAKE3 雜湊驗證通過"
         return 0
     else
-        log_error "BLAKE3 雜湊驗證失敗！預期: $expected_hash，實際: $actual_hash"
+        verification_stats "BLAKE3 驗證" "$start_time" "$end_time" "failure" "$file_path"
+        log_error "BLAKE3 雜湊驗證失敗！"
+        log_detail "預期雜湊：$expected_hash"
+        log_detail "實際雜湊：$actual_hash"
+        generate_diagnostic_info "BLAKE3 雜湊不符" "$file_path" "可能的檔案損壞或演算法實現差異"
         return 1
     fi
 }
@@ -885,27 +1011,30 @@ generate_par2_file() {
     echo "$par2_file"
 }
 
-# PAR2 修復冗餘函數 - 驗證 PAR2 修復檔案
+# PAR2 修復冗餘函數 - 驗證 PAR2 修復檔案 (強化版)
 verify_par2() {
     local file_path="$1"
     local par2_file="$2"
+    local start_time
+    start_time=$(date +%s.%3N)
     
     log_step "驗證 PAR2 修復檔案..." >&2
     
     # 檢查 PAR2 檔案是否存在
     if [ ! -f "$par2_file" ]; then
         log_error "PAR2 檔案不存在: $par2_file" >&2
+        generate_diagnostic_info "PAR2 檔案遺失" "$par2_file" "PAR2 產生過程可能失敗" >&2
         return 1
     fi
     
     # 檢查原始檔案是否存在
     if [ ! -f "$file_path" ]; then
         log_error "原始檔案不存在: $file_path" >&2
+        generate_diagnostic_info "原始檔案遺失" "$file_path" "壓縮檔案可能被移動或刪除" >&2
         return 1
     fi
     
     # 使用 par2 verify 命令驗證檔案完整性
-    # 不使用 -q 參數，並改善輸出解析邏輯
     local verify_output
     local verify_exit_code
     
@@ -913,21 +1042,29 @@ verify_par2() {
     verify_output=$(par2 verify "$par2_file" 2>&1)
     verify_exit_code=$?
     
+    local end_time
+    end_time=$(date +%s.%3N)
+    
     # 檢查 par2 命令的退出碼
     if [ $verify_exit_code -eq 0 ]; then
         # 退出碼為 0 表示驗證成功
         # 檢查輸出是否包含錯誤訊息
         if echo "$verify_output" | grep -q -i "error\|failed\|corrupt\|missing"; then
+            verification_stats "PAR2 驗證" "$start_time" "$end_time" "failure" "$file_path" >&2
             log_error "PAR2 驗證發現問題: $verify_output" >&2
+            generate_diagnostic_info "PAR2 內容驗證失敗" "$par2_file" "PAR2 檔案可能存在內部錯誤" >&2
             return 1
         else
+            verification_stats "PAR2 驗證" "$start_time" "$end_time" "success" "$file_path" >&2
             log_success "PAR2 驗證通過 - 檔案完整性正常" >&2
             log_detail "PAR2 輸出: $(echo "$verify_output" | tr '\n' ' ' | sed 's/  */ /g')" >&2
             return 0
         fi
     else
         # 退出碼非 0 表示驗證失敗
+        verification_stats "PAR2 驗證" "$start_time" "$end_time" "failure" "$file_path" >&2
         log_error "PAR2 驗證失敗 (退出碼: $verify_exit_code): $verify_output" >&2
+        generate_diagnostic_info "PAR2 命令執行失敗" "$par2_file" "par2 工具版本或參數問題，退出碼: $verify_exit_code" >&2
         return 1
     fi
 }
@@ -1003,6 +1140,8 @@ process_7z_files() {
         local base_name
         base_name=$(basename "$zip_file" .7z)
         local file_success=false
+        local total_start_time
+        total_start_time=$(date +%s.%3N)
         
         # 顯示當前進度
         progress_bar $((i+1)) ${#zip_files[@]} "處理進度"
@@ -1063,7 +1202,7 @@ process_7z_files() {
                             local par2_file
                             if par2_file=$(generate_par2_file "$output_file"); then
                                 
-                                                                    # 步驟 7: 驗證 PAR2 修復檔案
+                                # 步驟 7: 驗證 PAR2 修復檔案
                                 if verify_par2 "$output_file" "$par2_file"; then
                                     
                                     # 清理解壓縮的臨時檔案
@@ -1118,9 +1257,25 @@ process_7z_files() {
                                         par2_size_str="$(echo "scale=2; $par2_total_size/1024" | bc) KB"
                                     fi
                                     
+                                    # 計算總處理時間並顯示統計
+                                    local total_end_time
+                                    total_end_time=$(date +%s.%3N)
+                                    local total_duration
+                                    total_duration=$(echo "scale=3; $total_end_time - $total_start_time" | bc)
+                                    
+                                    log_progress "=== 檔案處理統計 ==="
                                     log_progress "原始檔案: $original_size_str"
                                     log_progress "壓縮檔案: $new_size_str (壓縮比: $ratio%)"
                                     log_progress "PAR2修復檔: $par2_size_str (冗餘比: $par2_ratio%)"
+                                    log_progress "總處理時間: ${total_duration}s"
+                                    
+                                    # 計算總體處理速度
+                                    if [ "$total_duration" != "0" ] && [ "$total_duration" != "0.000" ]; then
+                                        local total_speed
+                                        total_speed=$(echo "scale=2; $original_size/1048576/$total_duration" | bc)
+                                        log_progress "總體處理速度: ${total_speed} MB/s"
+                                    fi
+                                    
                                     log_success "檔案處理完成！包含完整冷儲存檔案組"
                                     file_success=true
                                     ((success_count++))
@@ -1155,9 +1310,16 @@ process_7z_files() {
             rm -rf "$extracted_dir" 2>/dev/null || log_warning "無法清理臨時檔案: $extracted_dir"
         fi
         
-        # 如果處理失敗，顯示錯誤摘要
+        # 如果處理失敗，顯示錯誤摘要和診斷資訊
         if [ "$file_success" = false ]; then
+            local total_end_time
+            total_end_time=$(date +%s.%3N)
+            local total_duration
+            total_duration=$(echo "scale=3; $total_end_time - $total_start_time" | bc)
+            
             log_error "檔案 $(basename "$zip_file") 處理失敗"
+            log_detail "失敗前處理時間: ${total_duration}s"
+            generate_diagnostic_info "檔案處理流程失敗" "$zip_file" "請檢查上述錯誤訊息以確定具體失敗原因"
         fi
         
         printf "\n"  # 每個檔案處理完後添加空行分隔
