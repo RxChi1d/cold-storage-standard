@@ -1,10 +1,10 @@
 #!/bin/bash
-# Bash Script: 7z 轉 tar.zst 冷儲存封存工具
+# Archive-Compress.sh: 7z 轉 tar.zst 冷儲存封存工具
 # 作者: AI Assistant
-# 版本: v2.0 (階段8完成版)
+# 版本: v2.1 (重新命名版)
 # 用途: 將 7z 檔案轉換為 tar.zst 格式並產生完整的冷儲存封存檔案組
 #
-# 🎯 冷儲存封存 SOP 流程 (符合企劃書第6.3節分離模式):
+# [SOP] 冷儲存封存 SOP 流程 (符合企劃書第6.3節分離模式):
 # 1. 解壓縮 7z 檔案 (智能目錄結構檢測)
 # 2. 建立 deterministic tar 封存 (--sort=name, 保留原始時間戳和所有者)
 # 3. tar header 立即驗證 (早期錯誤偵測)
@@ -14,17 +14,17 @@
 # 7. PAR2 修復冗餘 (10%, 簡化輸出方案)
 # 8. 多層驗證確保完整性 (5階段驗證流程)
 #
-# 🗜️ Zstd 冷儲存最佳化參數:
+# [ZSTD] Zstd 冷儲存最佳化參數:
 # -19: 高壓縮等級，平衡壓縮比和速度
 # --long=31: 2GB dictionary window，用於大檔案優化，壓縮率提升 3-10%
 # --check: 內建完整性檢查，確保資料正確性
 #
-# 📋 大檔案處理 (>4GB) 及跨平台相容性:
+# [FILES] 大檔案處理 (>4GB) 及跨平台相容性:
 # - 預設使用 POSIX tar 格式，確保跨平台相容性且支援大檔案
 # - 備用方案: GNU 格式 (如果 POSIX 不可用)
 # - 不支援 ustar 格式 (有 4GB 限制，不適合大檔案處理)
 #
-# 📦 輸出檔案:
+# [OUTPUT] 輸出檔案:
 # - exp42.tar.zst (主檔，含 32-bit zstd checksum)
 # - exp42.tar.zst.sha256 (SHA-256 雜湊)
 # - exp42.tar.zst.blake3 (BLAKE3 雜湊)
@@ -56,12 +56,12 @@ show_usage() {
   $0 --flat ~/archives                  # 使用扁平結構 (與舊版相容)
   $0 -l 22 -o /backup ~/archives        # 最高壓縮等級 + 自訂輸出目錄
 
-📋 系統需求:
+[SYSTEM] 系統需求:
   工具依賴: 7z, tar (支援 POSIX/GNU 格式), zstd, bc, sha256sum, b3sum, par2
   記憶體需求: 建議 4GB+ RAM (--long=31 需要約 2.2GB 壓縮記憶體)
   磁碟空間: 至少為原始檔案大小的 2-3 倍 (含臨時檔案和冗餘)
   
-🎯 冷儲存功能:
+[FEATURES] 冷儲存功能:
   - Deterministic tar: 確保可重現性 (--sort=name)
   - 高效壓縮: zstd 最佳化參數，壓縮比可達 60-80%
   - 雙重雜湊: SHA-256 + BLAKE3 提供最高安全性
@@ -69,7 +69,7 @@ show_usage() {
   - 5階段驗證: 確保每步驟完整性
   - 智能組織: 子目錄結構，避免檔案混亂
 
-⚠️ 注意事項:
+注意事項:
   - 大檔案 (>2GB) 處理可能需要較長時間
   - 建議在 SSD 上進行處理以提升效能
   - 轉換後的檔案會保存在同一目錄中
@@ -185,15 +185,15 @@ log_info() {
 }
 
 log_success() {
-    printf "${COLOR_BRIGHT_GREEN}✓ %s${COLOR_RESET}\n" "$1"
+    printf "${COLOR_BRIGHT_GREEN}+ %s${COLOR_RESET}\n" "$1"
 }
 
 log_warning() {
-    printf "${COLOR_BRIGHT_YELLOW}⚠ %s${COLOR_RESET}\n" "$1"
+    printf "${COLOR_BRIGHT_YELLOW}! %s${COLOR_RESET}\n" "$1"
 }
 
 log_error() {
-    printf "${COLOR_RED}✗ %s${COLOR_RESET}\n" "$1" >&2
+    printf "${COLOR_RED}- %s${COLOR_RESET}\n" "$1" >&2
 }
 
 log_step() {
@@ -379,17 +379,17 @@ check_required_tools() {
     local missing=()
     
     # 檢查 7z
-    local sevenz_status="✓ 已找到"
+    local sevenz_status="+ 已找到"
     if ! command -v 7z &> /dev/null; then
         missing+=("7z")
-        sevenz_status="✗ 缺少"
+        sevenz_status="- 缺少"
     fi
     
     # 檢查 tar
-    local tar_status="✓ 已找到"
+    local tar_status="+ 已找到"
     if ! command -v tar &> /dev/null; then
         missing+=("tar")
-        tar_status="✗ 缺少"
+        tar_status="- 缺少"
     else
         # 檢查 tar 格式支援以處理大檔案
         local supported_formats=($(check_tar_formats))
@@ -402,45 +402,45 @@ check_required_tools() {
             if [[ " ${supported_formats[*]} " =~ " gnu " ]]; then
                 ordered_formats+=("gnu")
             fi
-            tar_status="✓ 已找到 (格式: ${ordered_formats[*]})"
+            tar_status="+ 已找到 (格式: ${ordered_formats[*]})"
         else
-            tar_status="⚠ 已找到 (格式支援有限 - 可能有 4GB 檔案大小限制)"
+            tar_status="! 已找到 (格式支援有限 - 可能有 4GB 檔案大小限制)"
         fi
     fi
     
     # 檢查 zstd
-    local zstd_status="✓ 已找到"
+    local zstd_status="+ 已找到"
     if ! command -v zstd &> /dev/null; then
         missing+=("zstd")
-        zstd_status="✗ 缺少"
+        zstd_status="- 缺少"
     fi
     
     # 檢查 bc (用於計算)
-    local bc_status="✓ 已找到"
+    local bc_status="+ 已找到"
     if ! command -v bc &> /dev/null; then
         missing+=("bc")
-        bc_status="✗ 缺少"
+        bc_status="- 缺少"
     fi
     
     # 檢查 sha256sum
-    local sha256_status="✓ 已找到"
+    local sha256_status="+ 已找到"
     if ! command -v sha256sum &> /dev/null; then
         missing+=("sha256sum")
-        sha256_status="✗ 缺少"
+        sha256_status="- 缺少"
     fi
     
     # 檢查 b3sum (BLAKE3)
-    local b3sum_status="✓ 已找到"
+    local b3sum_status="+ 已找到"
     if ! command -v b3sum &> /dev/null; then
         missing+=("b3sum")
-        b3sum_status="✗ 缺少"
+        b3sum_status="- 缺少"
     fi
     
     # 檢查 par2 (PAR2 修復)
-    local par2_status="✓ 已找到"
+    local par2_status="+ 已找到"
     if ! command -v par2 &> /dev/null; then
         missing+=("par2")
-        par2_status="✗ 缺少"
+        par2_status="- 缺少"
     fi
     
     # 顯示所有工具檢查結果
@@ -520,7 +520,7 @@ check_7z_structure() {
         local current_path=""
         local current_is_folder=false
         
-        while IFS= read -r line; do
+    while IFS= read -r line; do
             if [[ "$line" == "Path = "* ]]; then
                 current_path="${line#Path = }"
             elif [[ "$line" == "Folder = +"* ]]; then
@@ -533,7 +533,7 @@ check_7z_structure() {
                     has_matching_top_folder=true
                 elif [[ "$current_path" == "$base_name/"* ]]; then
                     # 在同名資料夾內的檔案，這是好的
-                    continue
+            continue
                 else
                     # 不在同名資料夾內的項目（檔案或其他資料夾）
                     has_other_items=true
@@ -626,19 +626,19 @@ extract_7z_file() {
     fi
     
     # 驗證解壓縮結果
-    if [ ! -d "$extracted_dir" ]; then
+        if [ ! -d "$extracted_dir" ]; then
         log_error "解壓縮後目錄不存在: $extracted_dir"
-        return 1
-    fi
-    
+                return 1
+        fi
+        
     if [ -z "$(ls -A "$extracted_dir" 2>/dev/null)" ]; then
         log_error "解壓縮後目錄為空: $extracted_dir"
-        return 1
-    fi
-    
+            return 1
+        fi
+        
     # 返回解壓縮目錄路徑
-    echo "$extracted_dir"
-    log_success "已解壓縮至: $extracted_dir" >&2
+        echo "$extracted_dir"
+        log_success "已解壓縮至: $extracted_dir" >&2
 }
 
 # 重新壓縮為 tar.zst (分離模式，符合企劃書 SOP)
@@ -930,9 +930,9 @@ verification_stats() {
     duration=$(echo "scale=3; $end_time - $start_time" | bc)
     
     if [ "$status" = "success" ]; then
-        log_detail "✓ $stage_name 完成：耗時 ${duration}s" >&2
+        log_detail "+ $stage_name 完成：耗時 ${duration}s" >&2
     else
-        log_detail "✗ $stage_name 失敗：耗時 ${duration}s" >&2
+        log_detail "- $stage_name 失敗：耗時 ${duration}s" >&2
     fi
     
     # 如果有檔案路徑，顯示檔案大小資訊
@@ -1128,7 +1128,7 @@ verify_dual_hashes() {
     
     # 檢查雙重驗證結果
     if [ "$sha256_result" = true ] && [ "$blake3_result" = true ]; then
-        log_success "雙重雜湊驗證通過 (SHA-256 ✓ + BLAKE3 ✓)"
+        log_success "雙重雜湊驗證通過 (SHA-256 + BLAKE3)"
         return 0
     else
         log_error "雙重雜湊驗證失敗 (SHA-256: $sha256_result, BLAKE3: $blake3_result)"
@@ -1261,49 +1261,73 @@ verify_checksum() {
     verify_sha256 "$@"
 }
 
-# 注意：已移除複雜的中英文字符寬度計算函數
-# 改用簡單的固定寬度 printf 格式化，避免對齊問題
+# ===================================================================
+# 統計顯示系統 - 使用保守的 log 幫助函數
+# ===================================================================
 
-# 新增統計格式化函數
-format_file_size() {
-    local size_bytes=$1
-    if [ "$size_bytes" -gt 1073741824 ]; then  # 1GB
-        echo "$(echo "scale=2; $size_bytes/1073741824" | bc) GB"
-    elif [ "$size_bytes" -gt 1048576 ]; then  # 1MB
-        echo "$(echo "scale=2; $size_bytes/1048576" | bc) MB"
-    elif [ "$size_bytes" -gt 1024 ]; then  # 1KB
-        echo "$(echo "scale=2; $size_bytes/1024" | bc) KB"
+# 格式化檔案大小
+format_size() {
+    local bytes="$1"
+    if [ "$bytes" -ge 1073741824 ]; then
+        echo "$(echo "scale=1; $bytes/1073741824" | bc)GB"
+    elif [ "$bytes" -ge 1048576 ]; then
+        echo "$(echo "scale=1; $bytes/1048576" | bc)MB"
+    elif [ "$bytes" -ge 1024 ]; then
+        echo "$(echo "scale=1; $bytes/1024" | bc)KB"
     else
-        echo "$size_bytes B"
+        echo "${bytes}B"
     fi
 }
 
-format_duration() {
-    local duration=$1
-    if [ -z "$duration" ] || [ "$duration" = "0" ] || [ "$duration" = "0.000" ]; then
-        echo "< 0.001s"
-        return
-    fi
-    
-    local seconds minutes hours
-    seconds=$(echo "$duration" | cut -d. -f1)
-    local fraction=$(echo "$duration" | cut -d. -f2)
-    
-    if [ "$seconds" -ge 3600 ]; then
-        hours=$((seconds / 3600))
-        minutes=$(((seconds % 3600) / 60))
-        seconds=$((seconds % 60))
-        printf "%dh %dm %ds" "$hours" "$minutes" "$seconds"
-    elif [ "$seconds" -ge 60 ]; then
-        minutes=$((seconds / 60))
-        seconds=$((seconds % 60))
-        printf "%dm %ds" "$minutes" "$seconds"
-    else
-        printf "%ss" "$duration"
-    fi
+# 顯示分隔線
+print_separator() {
+    local char="${1:--}"
+    local length="${2:-60}"
+    printf "%*s\n" "$length" "" | tr ' ' "$char"
 }
 
-# 美化統計輸出函數
+# 顯示標題欄
+print_header() {
+    local title="$1"
+    echo
+    print_separator "=" 60
+    printf "  %s\n" "$title"
+    print_separator "=" 60
+}
+
+# 顯示資訊行 (鍵值對)
+print_info_line() {
+    local key="$1"
+    local value="$2"
+    local key_width=20
+    
+    # 截斷過長的鍵名
+    if [ ${#key} -gt $key_width ]; then
+        key="${key:0:$((key_width-1))}..."
+    fi
+    
+    printf "  %-${key_width}s : %s\n" "$key" "$value"
+}
+
+# 顯示狀態行 (帶圖示)
+print_status_line() {
+    local status="$1"
+    local description="$2"
+    local icon
+    
+    case "$status" in
+        "success"|"完成") icon="+" ;;
+        "error"|"錯誤") icon="-" ;;
+        "warning"|"警告") icon="!" ;;
+        "info"|"資訊") icon="*" ;;
+        "processing"|"處理中") icon="~" ;;
+        *) icon="*" ;;
+    esac
+    
+    printf "  %s %s\n" "$icon" "$description"
+}
+
+# 簡化的統計顯示函數（使用保守的 log 幫助函數）
 display_file_statistics() {
     local base_name="$1"
     local original_size="$2"
@@ -1313,75 +1337,82 @@ display_file_statistics() {
     local sha256_file="$6"
     local blake3_file="$7"
     local par2_file="$8"
-    local output_dir="$9"  # 新增輸出目錄參數
+    local output_dir="$9"
     
     # 計算比率
     local compression_ratio par2_ratio
-    compression_ratio=$(echo "scale=2; $new_size * 100 / $original_size" | bc)
-    par2_ratio=$(echo "scale=2; $par2_total_size * 100 / $new_size" | bc)
+    compression_ratio=$(echo "scale=1; (1 - $new_size/$original_size) * 100" | bc)
+    par2_ratio=$(echo "scale=1; $par2_total_size * 100 / $new_size" | bc)
     
     # 格式化檔案大小
     local original_size_str new_size_str par2_size_str
-    original_size_str=$(format_file_size "$original_size")
-    new_size_str=$(format_file_size "$new_size")
-    par2_size_str=$(format_file_size "$par2_total_size")
+    original_size_str=$(format_size "$original_size")
+    new_size_str=$(format_size "$new_size")
+    par2_size_str=$(format_size "$par2_total_size")
     
     # 格式化時間
     local duration_str
-    duration_str=$(format_duration "$total_duration")
+    if [ "$total_duration" != "0" ] && [ "$total_duration" != "0.000" ]; then
+        duration_str="${total_duration}s"
+    else
+        duration_str="< 0.001s"
+    fi
     
     # 計算處理速度
     local processing_speed=""
     if [ "$total_duration" != "0" ] && [ "$total_duration" != "0.000" ]; then
         local speed_mb_s
-        speed_mb_s=$(echo "scale=2; $original_size/1048576/$total_duration" | bc)
+        speed_mb_s=$(echo "scale=1; $original_size/1048576/$total_duration" | bc)
         processing_speed="$speed_mb_s MB/s"
     fi
     
-    # 美化的統計輸出 (重新設計固定寬度)
-    printf "\n"
-    log_progress "╭─────────────────────────────────────────────────────────────╮"
-    log_progress "│                        檔案處理統計                         │"
-    log_progress "├─────────────────────────────────────────────────────────────┤"
-    log_progress "$(printf "│ 檔案名稱: %-51s │" "$base_name")"
+    print_header "檔案處理統計"
+    print_info_line "檔案名稱" "$base_name"
+    
     if [ "$ORGANIZE_FILES" = true ]; then
         local rel_output_dir
         rel_output_dir=$(basename "$(dirname "$output_dir")")/$(basename "$output_dir")
-        log_progress "$(printf "│ 輸出目錄: %-51s │" "$rel_output_dir")"
+        print_info_line "輸出目錄" "$rel_output_dir"
     fi
-    log_progress "$(printf "│ 原始大小: %-12s 壓縮後: %-12s 比率: %-12s │" "$original_size_str" "$new_size_str" "$compression_ratio%")"
-    log_progress "$(printf "│ PAR2大小: %-12s PAR2比率: %-12s 時間: %-12s │" "$par2_size_str" "$par2_ratio%" "$duration_str")"
-    if [ -n "$processing_speed" ]; then
-        log_progress "$(printf "│ 處理速度: %-51s │" "$processing_speed")"
-    fi
-    log_progress "├─────────────────────────────────────────────────────────────┤"
-    log_progress "│                        生成檔案清單                         │"
-    log_progress "├─────────────────────────────────────────────────────────────┤"
     
-    # 顯示生成的檔案清單 (固定寬度格式)
+    print_info_line "原始大小" "$original_size_str (7z檔案)"
+    print_info_line "壓縮大小" "$new_size_str (tar.zst)"
+    print_info_line "壓縮率" "$compression_ratio%"
+    print_info_line "PAR2大小" "$par2_size_str"
+    print_info_line "修復比率" "$par2_ratio%"
+    print_info_line "處理時間" "$duration_str"
+    
+    if [ -n "$processing_speed" ]; then
+        print_info_line "處理速度" "$processing_speed"
+    fi
+    
+    print_separator "-" 60
+    printf "  生成檔案清單:\n"
+    
+    # 顯示生成的檔案清單
     local main_file="$output_dir/$base_name.tar.zst"
     if [ -f "$main_file" ]; then
         local file_size_str
-        file_size_str=$(format_file_size "$(stat -c%s "$main_file")")
-        log_progress "$(printf "│ ✓ %-42s %13s │" "$(basename "$main_file")" "$file_size_str")"
+        file_size_str=$(format_size "$(stat -c%s "$main_file")")
+        print_status_line "完成" "$(basename "$main_file") ($file_size_str)"
     fi
     
     if [ -f "$sha256_file" ]; then
         local file_size_str
-        file_size_str=$(format_file_size "$(stat -c%s "$sha256_file")")
-        log_progress "$(printf "│ ✓ %-42s %13s │" "$(basename "$sha256_file")" "$file_size_str")"
+        file_size_str=$(format_size "$(stat -c%s "$sha256_file")")
+        print_status_line "完成" "$(basename "$sha256_file") ($file_size_str)"
     fi
     
     if [ -f "$blake3_file" ]; then
         local file_size_str
-        file_size_str=$(format_file_size "$(stat -c%s "$blake3_file")")
-        log_progress "$(printf "│ ✓ %-42s %13s │" "$(basename "$blake3_file")" "$file_size_str")"
+        file_size_str=$(format_size "$(stat -c%s "$blake3_file")")
+        print_status_line "完成" "$(basename "$blake3_file") ($file_size_str)"
     fi
     
     if [ -f "$par2_file" ]; then
         local file_size_str
-        file_size_str=$(format_file_size "$(stat -c%s "$par2_file")")
-        log_progress "$(printf "│ ✓ %-42s %13s │" "$(basename "$par2_file")" "$file_size_str")"
+        file_size_str=$(format_size "$(stat -c%s "$par2_file")")
+        print_status_line "完成" "$(basename "$par2_file") ($file_size_str)"
         
         # 查找並顯示所有相關的 .vol 檔案
         local vol_files
@@ -1390,18 +1421,18 @@ display_file_statistics() {
             while IFS= read -r vol_file; do
                 if [ -f "$vol_file" ]; then
                     local vol_size_str
-                    vol_size_str=$(format_file_size "$(stat -c%s "$vol_file")")
-                    log_progress "$(printf "│ ✓ %-42s %13s │" "$(basename "$vol_file")" "$vol_size_str")"
+                    vol_size_str=$(format_size "$(stat -c%s "$vol_file")")
+                    print_status_line "完成" "$(basename "$vol_file") ($vol_size_str)"
                 fi
             done <<< "$vol_files"
         fi
     fi
     
-    log_progress "╰─────────────────────────────────────────────────────────────╯"
+    print_separator "=" 60
     printf "\n"
 }
 
-# 總體摘要報告函數
+# 簡化的摘要報告函數（使用保守的 log 幫助函數）
 display_final_summary() {
     local success_count="$1"
     local error_count="$2"
@@ -1411,50 +1442,54 @@ display_final_summary() {
     
     # 計算總處理時間
     local total_processing_time
-    total_processing_time=$(echo "scale=3; $total_end_time - $total_start_time" | bc)
-    local total_duration_str
-    total_duration_str=$(format_duration "$total_processing_time")
+    total_processing_time=$(echo "scale=2; $total_end_time - $total_start_time" | bc)
     
     # 計算成功率
     local success_rate
     success_rate=$(echo "scale=1; $success_count * 100 / $total_files" | bc)
     
-    printf "\n"
-    log_progress "╭─────────────────────────────────────────────────────────────╮"
-    log_progress "│                      批次處理總摘要                         │"
-    log_progress "├─────────────────────────────────────────────────────────────┤"
-    log_progress "$(printf "│ 總檔案數: %-6s 成功: %-6s 失敗: %-6s 成功率: %-12s │" "$total_files" "$success_count" "$error_count" "$success_rate%")"
-    log_progress "$(printf "│ 總處理時間: %-48s │" "$total_duration_str")"
+    print_header "批次處理摘要"
+    print_info_line "總計檔案" "$total_files 個檔案"
+    print_status_line "完成" "${success_count} 個檔案成功處理"
+    
+    if [ "$error_count" -gt 0 ]; then
+        print_status_line "錯誤" "${error_count} 個檔案處理失敗"
+    fi
+    
+    print_info_line "處理時間" "${total_processing_time} 秒"
+    
+    # 計算成功率
+    if [ "$total_files" -gt 0 ]; then
+        print_info_line "成功率" "${success_rate}%"
+    fi
     
     if [ "$success_count" -gt 0 ]; then
         local avg_time_per_file
-        avg_time_per_file=$(echo "scale=3; $total_processing_time / $success_count" | bc)
-        local avg_time_str
-        avg_time_str=$(format_duration "$avg_time_per_file")
-        log_progress "$(printf "│ 平均處理時間: %-46s │" "$avg_time_str")"
+        avg_time_per_file=$(echo "scale=2; $total_processing_time / $success_count" | bc)
+        print_info_line "平均處理時間" "${avg_time_per_file} 秒"
     fi
     
-    log_progress "├─────────────────────────────────────────────────────────────┤"
+    print_separator "-" 60
     
     if [ "$error_count" -eq 0 ]; then
-        log_progress "│                    ✓ 所有檔案處理成功！                    │"
-        log_progress "│              冷儲存封存檔案組已完整建立                  │"
+        print_status_line "完成" "所有檔案處理成功！"
+        printf "  冷儲存封存檔案組已完整建立\n"
     else
-        log_progress "│              ⚠ 有 $error_count 個檔案處理失敗                        │"
-        log_progress "│                 請檢查上述錯誤訊息                       │"
+        print_status_line "警告" "有 $error_count 個檔案處理失敗"
+        printf "  請檢查上述錯誤訊息\n"
     fi
     
-    log_progress "╰─────────────────────────────────────────────────────────────╯"
+    print_separator "=" 60
     printf "\n"
     
     # 顯示企劃書符合性檢查
-    log_info "✓ 冷儲存 SOP 符合性檢查："
-    log_detail "• Deterministic Tar (--sort=name): ✓"
-    log_detail "• Zstd 最佳化 (--long=31, -19): ✓"
-    log_detail "• 雙重雜湊 (SHA-256 + BLAKE3): ✓"
-    log_detail "• PAR2 修復冗餘 (10%): ✓"
-    log_detail "• 多層驗證流程: ✓"
-    log_detail "• 檔案組完整性: ✓"
+    log_info "+ 冷儲存 SOP 符合性檢查："
+    log_detail "* Deterministic Tar (--sort=name): +"
+    log_detail "* Zstd 最佳化 (--long=31, -19): +"
+    log_detail "* 雙重雜湊 (SHA-256 + BLAKE3): +"
+    log_detail "* PAR2 修復冗餘 (10%): +"
+    log_detail "* 多層驗證流程: +"
+    log_detail "* 檔案組完整性: +"
 }
 
 # 主要處理函數 (階段8完整版)
@@ -1580,7 +1615,7 @@ process_7z_files() {
         
         # 顯示當前進度
         printf "\n"
-        log_progress "════════════════════════════════════════════════════════════"
+        log_progress "================================================================"
         progress_bar $((i+1)) ${#zip_files[@]} "批次進度"
         log_step "[$((i+1))/${#zip_files[@]}] 正在處理: $(basename "$zip_file")"
         
@@ -1588,9 +1623,9 @@ process_7z_files() {
         local file_size
         file_size=$(stat -c%s "$zip_file")
         local file_size_str
-        file_size_str=$(format_file_size "$file_size")
+        file_size_str=$(format_size "$file_size")
         log_info "檔案大小: $file_size_str"
-        log_progress "════════════════════════════════════════════════════════════"
+        log_progress "================================================================"
         
         # 初始化錯誤處理變數
         local extracted_dir=""
@@ -1799,7 +1834,7 @@ if [ ! -w "$WORK_DIRECTORY" ]; then
     log_error "工作目錄沒有寫入權限: $WORK_DIRECTORY"
     exit 1
 fi
-log_detail "工作目錄寫入權限: ✓"
+log_detail "工作目錄寫入權限: +"
 
 # 檢查磁碟空間
 available_space=$(df "$WORK_DIRECTORY" | awk 'NR==2 {print $4}')
@@ -1813,7 +1848,7 @@ fi
 test_temp_dir="$WORK_DIRECTORY/.test_temp_$$"
 if mkdir -p "$test_temp_dir" 2>/dev/null; then
     rm -rf "$test_temp_dir"
-    log_detail "臨時目錄創建測試: ✓"
+    log_detail "臨時目錄創建測試: +"
 else
     log_error "無法在工作目錄中創建臨時目錄"
     exit 1
@@ -1821,7 +1856,7 @@ fi
 
 # 顯示版本信息 (階段9更新)
 show_version_info() {
-    log_info "🎯 Rezip.sh v2.1 (階段9完成版) - 冷儲存封存工具"
+    log_info "Rezip.sh v2.1 (階段9完成版) - 冷儲存封存工具"
     log_detail "完整符合企劃書第6.3節分離模式要求"
     log_detail "支援功能: Deterministic Tar + Zstd最佳化 + 雙重雜湊 + PAR2修復 + 智能組織"
     log_detail "驗證階段: 5層驗證確保完整性"
@@ -1837,3 +1872,5 @@ process_7z_files
 
 # 腳本結束標記
 log_detail "腳本執行完成 - Rezip.sh v2.1 (階段9完成版) - 支援智能檔案組織"
+
+
