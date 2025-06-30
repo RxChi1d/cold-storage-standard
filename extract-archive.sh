@@ -1,15 +1,15 @@
 #!/bin/bash
-# 解壓縮腳本 - 冷儲存封存檔案安全解壓縮工具
+# 解壓縮腳本 - 冷儲存封存檔案解壓縮工具
 # 作者: AI Assistant
-# 版本: v1.0
-# 用途: 安全解壓縮 tar.zst 檔案，自動進行完整性檢查
+# 版本: v2.0
+# 用途: 專門負責 tar.zst 檔案的解壓縮
 #
 # [EXTRACT] 解壓縮流程：
-# 1. 執行解壓縮前完整性檢查
-# 2. 使用正確的 zstd 參數進行解壓縮
-# 3. 安全的目標目錄創建
-# 4. 檔案覆蓋保護機制
-# 5. 解壓縮進度和統計資訊
+# 1. 安全的目標目錄創建
+# 2. 檔案覆蓋保護機制
+# 3. 使用正確的 zstd 參數進行解壓縮
+# 4. 解壓縮進度和統計資訊
+# 5. 解壓縮後基本驗證
 #
 # [USAGE] 使用方式:
 # ./extract-archive.sh file.tar.zst                    # 解壓縮到當前目錄
@@ -27,21 +27,17 @@ show_usage() {
 選項:
   -o, --output DIR        指定解壓縮輸出目錄 (預設: 檔案名稱目錄)
   -f, --force            強制覆蓋現有檔案
-  -c, --check            解壓縮前執行完整性檢查 (預設啟用)
-  --no-check             跳過完整性檢查
   -v, --verbose          顯示詳細解壓縮資訊
   -q, --quiet            安靜模式，減少輸出
   -h, --help             顯示此說明
 
 解壓縮流程:
-  1. 完整性檢查 (zstd + hashes + PAR2)
-  2. 目標目錄準備
-  3. 兩階段解壓縮 (zstd 解壓縮 → tar 展開)
-  4. 解壓縮後驗證
-  5. 統計資訊報告
+  1. 目標目錄準備
+  2. 兩階段解壓縮 (zstd 解壓縮 → tar 展開)
+  3. 解壓縮後基本驗證
+  4. 統計資訊報告
 
 安全特性:
-  + 自動完整性檢查
   + 覆蓋保護機制
   + 目標目錄安全創建
   + 解壓縮進度顯示
@@ -52,10 +48,14 @@ show_usage() {
   $0 -o /tmp/extract archive.tar.zst        # 指定輸出目錄
   $0 -f archive.tar.zst                     # 強制覆蓋模式
   $0 -v archive.tar.zst                     # 詳細模式
-  $0 --no-check archive.tar.zst             # 跳過檢查
+
+注意事項:
+  此腳本僅負責解壓縮，不進行完整性驗證
+  建議使用前先執行 verify-archive.sh 驗證檔案完整性
+  或使用 verify-and-extract.sh 進行完整的驗證與解壓縮流程
 
 [SYSTEM] 系統需求:
-  工具依賴: zstd, tar, sha256sum, b3sum, par2
+  工具依賴: zstd, tar
   相容性: 與 archive-compress.sh v2.1 完全相容
 EOF
 }
@@ -64,7 +64,6 @@ EOF
 VERBOSE=false
 QUIET=false
 FORCE_OVERWRITE=false
-PERFORM_CHECK=true
 OUTPUT_DIR=""
 TARGET_FILE=""
 
@@ -126,14 +125,6 @@ parse_arguments() {
                 FORCE_OVERWRITE=true
                 shift
                 ;;
-            -c|--check)
-                PERFORM_CHECK=true
-                shift
-                ;;
-            --no-check)
-                PERFORM_CHECK=false
-                shift
-                ;;
             -v|--verbose)
                 VERBOSE=true
                 shift
@@ -169,27 +160,18 @@ parse_arguments() {
 check_required_tools() {
     local missing=()
     
-    # 基本工具（必須）
+    # 只檢查解壓縮必需的工具
     for tool in zstd tar; do
         if ! command -v "$tool" &> /dev/null; then
             missing+=("$tool")
         fi
     done
     
-    # 檢查工具（僅在需要時檢查）
-    if [ "$PERFORM_CHECK" = true ]; then
-        for tool in sha256sum b3sum par2; do
-            if ! command -v "$tool" &> /dev/null; then
-                missing+=("$tool")
-            fi
-        done
-    fi
-    
     if [ ${#missing[@]} -ne 0 ]; then
         log_error "缺少必要工具: ${missing[*]}"
         log_info ""
         log_info "安裝建議 (Ubuntu/Debian):"
-        log_info "sudo apt update && apt install zstd par2cmdline b3sum"
+        log_info "sudo apt update && apt install zstd"
         exit 1
     fi
     
@@ -214,66 +196,6 @@ format_size() {
 print_separator() {
     if [ "$QUIET" = false ]; then
         printf "%*s\n" 60 "" | tr ' ' '='
-    fi
-}
-
-# 執行完整性檢查
-perform_integrity_check() {
-    local file_path="$1"
-    
-    log_step "執行解壓縮前完整性檢查..."
-    
-    # 檢查 verify-archive.sh 是否存在
-    local verify_script="./verify-archive.sh"
-    if [ ! -f "$verify_script" ]; then
-        # 嘗試在相同目錄中尋找
-        verify_script="$(dirname "$0")/verify-archive.sh"
-        if [ ! -f "$verify_script" ]; then
-            log_warning "找不到 verify-archive.sh，執行簡化檢查"
-            return $(perform_basic_check "$file_path")
-        fi
-    fi
-    
-    # 執行完整檢查
-    log_detail "使用 verify-archive.sh 進行完整檢查"
-    if [ "$VERBOSE" = true ]; then
-        if bash "$verify_script" -v "$file_path"; then
-            log_success "完整性檢查通過"
-            return 0
-        else
-            log_error "完整性檢查失敗"
-            return 1
-        fi
-    else
-        if bash "$verify_script" -q "$file_path"; then
-            log_success "完整性檢查通過"
-            return 0
-        else
-            log_error "完整性檢查失敗"
-            return 1
-        fi
-    fi
-}
-
-# 執行基本檢查（當 verify-archive.sh 不可用時）
-perform_basic_check() {
-    local file_path="$1"
-    
-    log_detail "執行基本 zstd 完整性檢查"
-    
-    # 檢查檔案是否存在
-    if [ ! -f "$file_path" ]; then
-        log_error "檔案不存在: $file_path"
-        return 1
-    fi
-    
-    # 執行 zstd 測試
-    if zstd -tq --long=31 "$file_path" 2>/dev/null; then
-        log_success "基本完整性檢查通過"
-        return 0
-    else
-        log_error "zstd 完整性檢查失敗"
-        return 1
     fi
 }
 
@@ -356,7 +278,7 @@ perform_extraction() {
             local end_time duration
             end_time=$(date +%s.%3N)
             duration=$(echo "scale=2; $end_time - $start_time" | bc)
-            log_success "完整解壓縮完成 (zstd + tar) (耗時: ${duration}s)"
+            log_success "解壓縮完成 (zstd + tar) (耗時: ${duration}s)"
         else
             log_error "解壓縮失敗"
             return 1
@@ -368,7 +290,7 @@ perform_extraction() {
             local end_time duration
             end_time=$(date +%s.%3N)
             duration=$(echo "scale=2; $end_time - $start_time" | bc)
-            log_success "完整解壓縮完成 (zstd + tar) (耗時: ${duration}s)"
+            log_success "解壓縮完成 (zstd + tar) (耗時: ${duration}s)"
         else
             log_error "解壓縮失敗"
             return 1
@@ -378,11 +300,11 @@ perform_extraction() {
     return 0
 }
 
-# 解壓縮後驗證
+# 解壓縮後基本驗證
 post_extraction_verification() {
     local output_dir="$1"
     
-    log_step "執行解壓縮後驗證..."
+    log_step "執行解壓縮後基本驗證..."
     
     # 檢查輸出目錄
     if [ ! -d "$output_dir" ]; then
@@ -400,7 +322,7 @@ post_extraction_verification() {
         return 1
     fi
     
-    log_success "解壓縮驗證通過"
+    log_success "基本驗證通過"
     log_detail "檔案數量: $file_count"
     log_detail "總計大小: $(format_size "$total_size")"
     
@@ -509,21 +431,9 @@ main() {
     
     # 顯示開始資訊
     if [ "$QUIET" = false ]; then
-        log_info "解壓縮工具 v1.0 - 冷儲存封存檔案安全解壓縮"
+        log_info "解壓縮工具 v2.0 - 專門的 tar.zst 解壓縮工具"
         log_info "檔案: $(basename "$TARGET_FILE")"
-        echo
-    fi
-    
-    # 執行完整性檢查
-    if [ "$PERFORM_CHECK" = true ]; then
-        if ! perform_integrity_check "$TARGET_FILE"; then
-            log_error "完整性檢查失敗，停止解壓縮"
-            log_info "使用 --no-check 選項跳過檢查（不建議）"
-            exit 1
-        fi
-        echo
-    else
-        log_warning "跳過完整性檢查（不建議）"
+        log_warning "注意: 此工具不進行完整性驗證，建議先使用 verify-archive.sh"
         echo
     fi
     
@@ -540,9 +450,9 @@ main() {
     fi
     echo
     
-    # 解壓縮後驗證
+    # 解壓縮後基本驗證
     if ! post_extraction_verification "$OUTPUT_DIR"; then
-        log_error "解壓縮後驗證失敗"
+        log_error "解壓縮後基本驗證失敗"
         exit 1
     fi
     echo
