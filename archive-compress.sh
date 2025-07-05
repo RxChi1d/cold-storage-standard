@@ -475,7 +475,7 @@ check_required_tools() {
     fi
 }
 
-# 檢查 7z 檔案結構 (重新設計，更準確判斷)
+# 檢查 7z 檔案結構 (修復版：正確解析檔案列表)
 check_7z_structure() {
     local zip_file="$1"
     
@@ -493,74 +493,81 @@ check_7z_structure() {
         return 1
     fi
     
-    # 使用 7z 列表命令檢查結構 (使用更簡單的輸出格式)
-    local list_output
-    if ! list_output=$(7z l "$zip_file" 2>/dev/null | grep -E "^[^-].*[^/\\]$" | tail -n +3 | head -n -2); then
-        log_warning "無法分析壓縮檔結構，將建立資料夾"
-        return 1
-    fi
-    
-    # 檢查是否為空壓縮檔
-    if [ -z "$list_output" ]; then
-        log_warning "壓縮檔為空，將建立資料夾"
-        return 1
-    fi
-    
     # 獲取檔案名稱 (不含副檔名)
     local base_name
     base_name=$(basename "$zip_file" .7z)
     
-    # 更可靠的檢查方法：檢查是否所有項目都在同一個與檔案名稱相同的資料夾中
-    local has_matching_top_folder=false
-    local has_other_items=false
-    
-    # 使用 7z 詳細列表格式檢查
-    local output
-    if output=$(7z l "$zip_file" -slt 2>/dev/null); then
-        local current_path=""
-        local current_is_folder=false
-        
-    while IFS= read -r line; do
-            if [[ "$line" == "Path = "* ]]; then
-                current_path="${line#Path = }"
-            elif [[ "$line" == "Folder = +"* ]]; then
-                current_is_folder=true
-            elif [[ "$line" == "Folder = -"* ]]; then
-                current_is_folder=false
-            elif [[ "$line" == "" ]] && [[ -n "$current_path" ]]; then
-                # 處理完一個項目，分析路徑
-                if [[ "$current_path" == "$base_name" ]] && [[ "$current_is_folder" == true ]]; then
-                    has_matching_top_folder=true
-                elif [[ "$current_path" == "$base_name/"* ]]; then
-                    # 在同名資料夾內的檔案，這是好的
-            continue
-                else
-                    # 不在同名資料夾內的項目（檔案或其他資料夾）
-                    has_other_items=true
-                    break
-                fi
-                
-                # 重置狀態
-                current_path=""
-                current_is_folder=false
-            fi
-        done <<< "$output"
-        
-        # 處理最後一個項目（如果檔案末尾沒有空行）
-        if [[ -n "$current_path" ]]; then
-            if [[ "$current_path" == "$base_name" ]] && [[ "$current_is_folder" == true ]]; then
-                has_matching_top_folder=true
-            elif [[ "$current_path" != "$base_name/"* ]]; then
-                has_other_items=true
-            fi
-        fi
-    else
-        # 如果無法解析，預設建立資料夾
+    # 使用 7z 獲取檔案列表
+    local archive_list
+    if ! archive_list=$(7z l "$zip_file" 2>/dev/null); then
+        log_warning "無法讀取壓縮檔內容，將建立資料夾"
         return 1
     fi
     
-    # 只有在有同名頂層資料夾且沒有其他散落項目時才返回 true
-    [ "$has_matching_top_folder" = true ] && [ "$has_other_items" = false ]
+    # 正確提取檔案列表：提取 Name 欄位的內容
+    # 找到包含檔案列表的部分（兩條分隔線之間）
+    local file_names
+    file_names=$(echo "$archive_list" | awk '
+        BEGIN { in_files = 0 }
+        /^-+$/ { 
+            if (in_files) exit
+            in_files = 1
+            next
+        }
+        in_files && NF >= 6 && !/^-+$/ && !/Name$/ && !/files.*folders/ { 
+            # 提取從第6欄開始的所有內容作為檔案名稱
+            # 跳過表頭和統計行
+            name = ""
+            for (i = 6; i <= NF; i++) {
+                if (i > 6) name = name " "
+                name = name $i
+            }
+            if (name != "" && name !~ /^[0-9]+ files.*folders/) {
+                print name
+            }
+        }
+    ')
+    
+    # 檢查是否成功提取檔案名稱
+    if [ -z "$file_names" ]; then
+        log_warning "無法解析壓縮檔結構，將建立資料夾"
+        return 1
+    fi
+    
+    # 提取第一層項目 (不包含路徑分隔符的項目)
+    local first_level_items
+    first_level_items=$(echo "$file_names" | grep -v "/" | grep -v "^$" | sort -u)
+    
+    # 計算第一層項目數量
+    local item_count
+    item_count=$(echo "$first_level_items" | grep -c "^." 2>/dev/null || echo "0")
+    
+    # 應用用戶策略判斷
+    if [ "$item_count" -eq 1 ]; then
+        local single_item
+        single_item=$(echo "$first_level_items" | head -n1)
+        
+        # 檢查是否為資料夾且與檔案名稱匹配
+        if [ "$single_item" = "$base_name" ]; then
+            # 驗證是否為資料夾 (檢查是否有子項目)
+            local has_subdirs
+            has_subdirs=$(echo "$file_names" | grep "^$single_item/" | head -n1)
+            
+            if [ -n "$has_subdirs" ]; then
+                log_info "檔案包含頂層資料夾，直接解壓縮"
+                return 0
+            fi
+        fi
+        
+        log_info "檔案為單一項目但非頂層資料夾，將建立同名資料夾"
+        return 1
+    elif [ "$item_count" -eq 0 ]; then
+        log_warning "壓縮檔為空，將建立資料夾"
+        return 1
+    else
+        log_info "檔案包含多個項目，將建立同名資料夾"
+        return 1
+    fi
 }
 
 # 解壓縮 7z 檔案 (優化版：根據結構智能選擇解壓縮策略)
