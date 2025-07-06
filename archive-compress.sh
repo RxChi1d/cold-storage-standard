@@ -1,30 +1,30 @@
 #!/bin/bash
 # Archive-Compress.sh: 7z 轉 tar.zst 冷儲存封存工具
 # 作者: AI Assistant
-# 版本: v2.1 (重新命名版)
+# 版本: v2.1
 # 用途: 將 7z 檔案轉換為 tar.zst 格式並產生完整的冷儲存封存檔案組
 #
-# [SOP] 冷儲存封存 SOP 流程 (符合企劃書第6.3節分離模式):
+# 冷儲存封存處理流程:
 # 1. 解壓縮 7z 檔案 (智能目錄結構檢測)
 # 2. 建立 deterministic tar 封存 (--sort=name, 保留原始時間戳和所有者)
 # 3. tar header 立即驗證 (早期錯誤偵測)
 # 4. zstd 高效壓縮 (--long=31, 2GB dictionary window)
 # 5. 壓縮檔案完整性驗證 (zstd + tar 內容雙重檢查)
 # 6. 雙重雜湊驗證 (SHA-256 + BLAKE3)
-# 7. PAR2 修復冗餘 (10%, 簡化輸出方案)
-# 8. 多層驗證確保完整性 (5階段驗證流程)
+# 7. PAR2 修復冗餘 (10% 修復檔案)
+# 8. 多層驗證確保完整性 (5層驗證流程)
 #
-# [ZSTD] Zstd 冷儲存最佳化參數:
+# Zstd 冷儲存最佳化參數:
 # -19: 高壓縮等級，平衡壓縮比和速度
 # --long=31: 2GB dictionary window，用於大檔案優化，壓縮率提升 3-10%
 # --check: 內建完整性檢查，確保資料正確性
 #
-# [FILES] 大檔案處理 (>4GB) 及跨平台相容性:
+# 大檔案處理 (>4GB) 及跨平台相容性:
 # - 預設使用 POSIX tar 格式，確保跨平台相容性且支援大檔案
 # - 備用方案: GNU 格式 (如果 POSIX 不可用)
 # - 不支援 ustar 格式 (有 4GB 限制，不適合大檔案處理)
 #
-# [OUTPUT] 輸出檔案:
+# 輸出檔案:
 # - exp42.tar.zst (主檔，含 32-bit zstd checksum)
 # - exp42.tar.zst.sha256 (SHA-256 雜湊)
 # - exp42.tar.zst.blake3 (BLAKE3 雜湊)
@@ -56,17 +56,17 @@ show_usage() {
   $0 --flat ~/archives                  # 使用扁平結構 (與舊版相容)
   $0 -l 22 -o /backup ~/archives        # 最高壓縮等級 + 自訂輸出目錄
 
-[SYSTEM] 系統需求:
+系統需求:
   工具依賴: 7z, tar (支援 POSIX/GNU 格式), zstd, bc, sha256sum, b3sum, par2
   記憶體需求: 建議 4GB+ RAM (--long=31 需要約 2.2GB 壓縮記憶體)
   磁碟空間: 至少為原始檔案大小的 2-3 倍 (含臨時檔案和冗餘)
   
-[FEATURES] 冷儲存功能:
+冷儲存功能:
   - Deterministic tar: 確保可重現性 (--sort=name)
   - 高效壓縮: zstd 最佳化參數，壓縮比可達 60-80%
   - 雙重雜湊: SHA-256 + BLAKE3 提供最高安全性
   - PAR2 修復: 10% 冗餘，可修復檔案損壞
-  - 5階段驗證: 確保每步驟完整性
+  - 5層驗證: 確保每步驟完整性
   - 智能組織: 子目錄結構，避免檔案混亂
 
 注意事項:
@@ -254,7 +254,7 @@ progress_bar() {
 check_tar_formats() {
     local supported_formats=()
     
-    # 測試 GNU 格式支援
+    # 檢查 GNU 格式支援
     if tar --help 2>&1 | grep -q -- "--format" && tar --help 2>&1 | grep -q "gnu"; then
         supported_formats+=("gnu")
     fi
@@ -265,7 +265,7 @@ check_tar_formats() {
     echo "${supported_formats[@]}"
 }
 
-# 設置輸出目錄結構 (階段9新增功能)
+# 設置輸出目錄結構
 setup_output_directory() {
     local base_name="$1"
     local work_dir="$2"
@@ -309,7 +309,7 @@ setup_output_directory() {
     echo "$final_output_dir"
 }
 
-# 清理輸出目錄 (階段9新增功能)
+# 清理輸出目錄
 cleanup_output_directory() {
     local output_dir="$1"
     local keep_successful="$2"  # true=保留成功的檔案，false=全部清理
@@ -326,7 +326,7 @@ cleanup_output_directory() {
     fi
 }
 
-# 檢查系統資源 (階段8強化功能)
+# 檢查系統資源
 check_system_resources() {
     local work_dir="$1"
     
@@ -648,7 +648,7 @@ extract_7z_file() {
         log_success "已解壓縮至: $extracted_dir" >&2
 }
 
-# 重新壓縮為 tar.zst (分離模式，符合企劃書 SOP)
+# 重新壓縮為 tar.zst (分離模式)
 compress_to_tar_zst() {
     local input_dir="$1"
     local output_file="$2"
@@ -743,7 +743,7 @@ compress_to_tar_zst() {
     fi
     
     # 顯示最終參數
-    log_detail "處理模式: 分離模式 (符合企劃書 SOP)"
+    log_detail "處理模式: 分離模式 (tar + zstd)"
     log_detail "tar 參數: --sort=name --format=$best_format (deterministic 檔案排序)"
     log_detail "zstd 參數: ${zstd_params[*]}"
     log_detail "臨時檔案: $temp_tar_basename"
@@ -766,8 +766,8 @@ compress_to_tar_zst() {
         rm -f "$temp_tar"
     fi
     
-    # 階段1：創建 deterministic tar 檔案
-    log_step "階段1: 創建 deterministic tar 檔案..." >&2
+    # 步驟1：創建 deterministic tar 檔案
+    log_step "步驟1: 創建 deterministic tar 檔案..." >&2
     if ! tar --sort=name --format="$best_format" -cf "$temp_tar" "$folder_name"; then
         log_error "tar 創建失敗"
         cd "$current_dir"
@@ -777,7 +777,7 @@ compress_to_tar_zst() {
     # 驗證 tar 檔案是否創建成功
     if [ ! -f "$temp_tar" ]; then
         log_error "tar 檔案創建失敗: $(basename "$temp_tar")"
-    cd "$current_dir"
+        cd "$current_dir"
         return 1
     fi
     
@@ -791,8 +791,8 @@ compress_to_tar_zst() {
     fi
     log_success "tar 檔案創建成功: $(basename "$temp_tar") ($tar_size_str)" >&2
     
-    # 階段2：驗證 tar header 完整性
-    log_step "階段2: 驗證 tar header 完整性..." >&2
+    # 步驟2：驗證 tar header 完整性
+    log_step "步驟2: 驗證 tar header 完整性..." >&2
     if ! tar -tvf "$temp_tar" > /dev/null 2>&1; then
         log_error "tar header 驗證失敗"
         rm -f "$temp_tar"  # 清理損壞的檔案
@@ -801,8 +801,8 @@ compress_to_tar_zst() {
     fi
     log_success "tar header 驗證通過" >&2
     
-    # 階段3：zstd 壓縮
-    log_step "階段3: zstd 壓縮處理..." >&2
+    # 步驟3：zstd 壓縮
+    log_step "步驟3: zstd 壓縮處理..." >&2
     if ! zstd "${zstd_params[@]}" "$temp_tar" -o "$output_file"; then
         log_error "zstd 壓縮失敗"
         rm -f "$temp_tar"  # 清理臨時檔案
@@ -828,8 +828,8 @@ compress_to_tar_zst() {
     fi
     log_success "zstd 壓縮完成: $(basename "$output_file") ($zst_size_str)" >&2
     
-    # 階段4：立即驗證壓縮檔案完整性（企劃書步驟4）
-    log_step "階段4: 驗證壓縮檔案完整性..." >&2
+    # 步驟4：立即驗證壓縮檔案完整性
+    log_step "步驟4: 驗證壓縮檔案完整性..." >&2
     
     # 準備驗證參數（需要與壓縮參數一致）
     local verify_params=()
@@ -874,8 +874,8 @@ compress_to_tar_zst() {
     log_detail "解壓縮後 tar 內容驗證通過" >&2
     log_success "壓縮檔案完整性驗證通過" >&2
     
-    # 階段5：清理臨時檔案
-    log_step "階段5: 清理臨時檔案..." >&2
+    # 步驟5：清理臨時檔案
+    log_step "步驟5: 清理臨時檔案..." >&2
     if rm -f "$temp_tar"; then
         log_success "臨時檔案清理完成: $(basename "$temp_tar")" >&2
     else
@@ -1489,8 +1489,8 @@ display_final_summary() {
     print_separator "=" 60
     printf "\n"
     
-    # 顯示企劃書符合性檢查
-    log_info "+ 冷儲存 SOP 符合性檢查："
+    # 顯示功能完整性檢查
+    log_info "+ 冷儲存功能檢查："
     log_detail "* Deterministic Tar (--sort=name): +"
     log_detail "* Zstd 最佳化 (--long=31, -19): +"
     log_detail "* 雙重雜湊 (SHA-256 + BLAKE3): +"
@@ -1499,7 +1499,7 @@ display_final_summary() {
     log_detail "* 檔案組完整性: +"
 }
 
-# 主要處理函數 (階段8完整版)
+# 主要處理函數
 process_7z_files() {
     # 檢查必要工具
     check_required_tools
@@ -1680,15 +1680,15 @@ process_7z_files() {
                                 
                                 # 步驟 7: 驗證 PAR2 修復檔案
                                 if verify_par2 "$output_file" "$par2_file"; then
-                            
-                            # 清理解壓縮的臨時檔案
-                            rm -rf "$extracted_dir"
-                            
-                            # 顯示檔案大小比較
-                            local original_size
-                            original_size=$(stat -c%s "$zip_file")
-                            local new_size
-                            new_size=$(stat -c%s "$output_file")
+                                    
+                                    # 清理解壓縮的臨時檔案
+                                    rm -rf "$extracted_dir"
+                                    
+                                    # 顯示檔案大小比較
+                                    local original_size
+                                    original_size=$(stat -c%s "$zip_file")
+                                    local new_size
+                                    new_size=$(stat -c%s "$output_file")
                                     # 計算 PAR2 總大小（主檔案 + 所有修復檔案）
                                     local par2_total_size=0
                                     local par2_main_size
@@ -1708,25 +1708,25 @@ process_7z_files() {
                                         done <<< "$vol_files"
                                     fi
                                     
-                            local ratio
-                            ratio=$(echo "scale=2; $new_size * 100 / $original_size" | bc)
+                                    local ratio
+                                    ratio=$(echo "scale=2; $new_size * 100 / $original_size" | bc)
                                     local par2_ratio
                                     par2_ratio=$(echo "scale=2; $par2_total_size * 100 / $new_size" | bc)
-                            
-                            # 格式化檔案大小
+                                    
+                                    # 格式化檔案大小
                                     local original_size_str new_size_str par2_size_str
-                            if [ "$original_size" -gt 1073741824 ]; then
-                                original_size_str="$(echo "scale=2; $original_size/1073741824" | bc) GB"
-                            else
-                                original_size_str="$(echo "scale=2; $original_size/1048576" | bc) MB"
-                            fi
-                            
-                            if [ "$new_size" -gt 1073741824 ]; then
-                                new_size_str="$(echo "scale=2; $new_size/1073741824" | bc) GB"
-                            else
-                                new_size_str="$(echo "scale=2; $new_size/1048576" | bc) MB"
-                            fi
-                            
+                                    if [ "$original_size" -gt 1073741824 ]; then
+                                        original_size_str="$(echo "scale=2; $original_size/1073741824" | bc) GB"
+                                    else
+                                        original_size_str="$(echo "scale=2; $original_size/1048576" | bc) MB"
+                                    fi
+                                    
+                                    if [ "$new_size" -gt 1073741824 ]; then
+                                        new_size_str="$(echo "scale=2; $new_size/1073741824" | bc) GB"
+                                    else
+                                        new_size_str="$(echo "scale=2; $new_size/1048576" | bc) MB"
+                                    fi
+                                    
                                     if [ "$par2_total_size" -gt 1048576 ]; then
                                         par2_size_str="$(echo "scale=2; $par2_total_size/1048576" | bc) MB"
                                     else
@@ -1739,17 +1739,17 @@ process_7z_files() {
                                     local total_duration
                                     total_duration=$(echo "scale=3; $total_end_time - $total_start_time" | bc)
                                     
-                                    # 使用新的美化統計輸出
+                                    # 使用美化統計輸出
                                     display_file_statistics "$base_name" "$original_size" "$new_size" "$par2_total_size" "$total_duration" "$sha256_file" "$blake3_file" "$par2_file" "$file_output_dir"
                                     
                                     log_success "檔案處理完成！包含完整冷儲存檔案組"
-                            file_success=true
-                            ((success_count++))
-                        else
+                                    file_success=true
+                                    ((success_count++))
+                                else
                                     log_error "PAR2 驗證失敗，保留臨時檔案供檢查"
-                            ((error_count++))
-                        fi
-                    else
+                                    ((error_count++))
+                                fi
+                            else
                                 log_error "PAR2 修復檔案產生失敗"
                                 ((error_count++))
                             fi
@@ -1851,22 +1851,21 @@ else
     log_detail "可用磁碟空間: $(echo "scale=2; $available_space/1048576" | bc) GB"
 fi
 
-# 測試臨時目錄創建
+# 檢查臨時目錄創建
 test_temp_dir="$WORK_DIRECTORY/.test_temp_$$"
 if mkdir -p "$test_temp_dir" 2>/dev/null; then
     rm -rf "$test_temp_dir"
-    log_detail "臨時目錄創建測試: +"
+    log_detail "臨時目錄創建檢查: +"
 else
     log_error "無法在工作目錄中創建臨時目錄"
     exit 1
 fi
 
-# 顯示版本信息 (階段9更新)
+# 顯示版本信息
 show_version_info() {
-    log_info "Rezip.sh v2.1 (階段9完成版) - 冷儲存封存工具"
-    log_detail "完整符合企劃書第6.3節分離模式要求"
-    log_detail "支援功能: Deterministic Tar + Zstd最佳化 + 雙重雜湊 + PAR2修復 + 智能組織"
-    log_detail "驗證階段: 5層驗證確保完整性"
+    log_info "Archive-Compress.sh v2.1 - 7z 轉 tar.zst 冷儲存封存工具"
+    log_detail "功能特色: Deterministic Tar + Zstd最佳化 + 雙重雜湊 + PAR2修復 + 智能組織"
+    log_detail "驗證機制: 5層驗證確保完整性"
     log_detail "檔案組織: 子目錄結構避免檔案混亂"
     printf "\n"
 }
@@ -1878,6 +1877,6 @@ show_version_info
 process_7z_files
 
 # 腳本結束標記
-log_detail "腳本執行完成 - Rezip.sh v2.1 (階段9完成版) - 支援智能檔案組織"
+log_detail "腳本執行完成 - Archive-Compress.sh v2.1 - 7z 轉 tar.zst 冷儲存封存工具"
 
 
