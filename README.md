@@ -1,20 +1,41 @@
-# 冷儲存封存工具集 (Cold Storage Archive Toolkit)
+# cold-storage-standard
 
-一套專為長期冷儲存設計的檔案封存工具，提供從壓縮、驗證到解壓縮的完整解決方案。
+**為研究數據和實驗結果設計的標準化冷儲存解決方案**
+
+將各種壓縮格式轉換為具有完整性保護的已驗證 tar.zst 封存檔，專為長期數據保存而設計。
 
 ![Version](https://img.shields.io/badge/version-v2.1-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Shell](https://img.shields.io/badge/shell-bash-yellow)
+![Standard](https://img.shields.io/badge/cold--storage-standard-orange)
 
 ## 🎯 專案目標
 
-建立一套專業的冷儲存封存系統，確保資料能夠在 10 年後依然完整可讀，具備：
+建立一套標準化的冷儲存封存系統，專為研究機構和實驗室環境設計，確保實驗數據能夠在 10 年後依然完整可讀，具備：
 
+- **標準化流程**: 統一的檔案格式轉換標準（7z/zip/rar → tar.zst）
 - **長期保存性**: 使用標準格式（tar + zstd），確保未來相容性
 - **完整性保證**: 多重驗證機制（SHA-256 + BLAKE3 + PAR2）
 - **錯誤修復**: 10% PAR2 冗餘，可修復檔案損壞
 - **高壓縮比**: zstd 最佳化，壓縮比可達 60-80%
 - **可重現性**: deterministic tar，確保相同輸入產生相同輸出
+- **研究友好**: 為學術環境和實驗數據保存最佳化
+
+## 📋 解決方案概述
+
+**cold-storage-standard** 提供完整的標準化冷儲存工作流程：
+
+```
+輸入格式 → 標準化處理 → 冷儲存格式
+7z/zip/rar → [驗證+轉換+保護] → tar.zst + 完整性檔案
+```
+
+**核心特性:**
+- 🔄 **格式標準化**: 將任意壓縮格式統一轉換為 tar.zst
+- 🛡️ **多層保護**: SHA-256 + BLAKE3 + PAR2 三重完整性保證
+- 📊 **可驗證性**: 每個檔案都包含完整的驗證信息
+- 🔬 **研究導向**: 專為實驗數據和研究成果設計
+- 📈 **效能最佳化**: 高壓縮比與快速驗證的平衡
 
 ## 📁 工具概覽
 
