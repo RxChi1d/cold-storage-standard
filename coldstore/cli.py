@@ -13,6 +13,7 @@ app = typer.Typer(
     help="Standardized cold storage solution for research data and experimental results",
     rich_markup_mode="rich",
     add_completion=False,
+    context_settings={"help_option_names": ["-h", "--help"]},
 )
 
 console = Console()
