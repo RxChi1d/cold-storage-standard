@@ -5,15 +5,22 @@ from typing import Annotated
 
 import typer
 
-from coldstore.logging import log_error, log_info, show_header
-
-app = typer.Typer(
-    help="Convert archives to cold storage format (equivalent to archive-compress.sh)"
+from coldstore.core.archive import create_analyzer
+from coldstore.core.compress import create_compressor
+from coldstore.core.hash import create_hash_generator
+from coldstore.core.organizer import create_organizer
+from coldstore.core.progress import create_progress_manager
+from coldstore.core.system import check_system_requirements
+from coldstore.logging import (
+    log_error,
+    log_info,
+    log_success,
+    show_header,
+    show_summary,
 )
 
 
-@app.callback(invoke_without_command=True)
-def pack(
+def main(
     input_path: Annotated[
         Path,
         typer.Argument(
@@ -83,10 +90,110 @@ def pack(
     log_info(f"Long-distance matching: {'disabled' if no_long else 'enabled'}")
     log_info(f"Integrity check: {'disabled' if no_check else 'enabled'}")
 
-    # TODO: Implement actual packing logic
-    log_error("Pack functionality not yet implemented")
-    raise typer.Exit(1)
+    # Step 1: System requirements check
+    log_info("Checking system requirements...")
+    if not check_system_requirements(input_path, output_dir, not no_long, True):
+        log_error("System requirements check failed")
+        raise typer.Exit(1)
 
+    # Step 2: Set up file organization
+    organizer = create_organizer(output_dir, flat)
+    organizer.setup_output_path(input_path)
 
-if __name__ == "__main__":
-    app()
+    # Check for existing files
+    if organizer.check_existing_files():
+        log_error(
+            "Output files already exist. Remove them or use a different output directory."
+        )
+        raise typer.Exit(1)
+
+    # Step 3: Handle archive extraction if needed
+    analyzer = create_analyzer()
+    work_path = input_path
+
+    if input_path.is_file() and analyzer.is_supported_archive(input_path):
+        log_info("Detected archive file, analyzing structure...")
+        structure_info = analyzer.analyze_archive_structure(input_path)
+
+        # Extract to temporary directory
+        temp_extract_path = analyzer.prepare_extraction_temp()
+        if not analyzer.extract_archive(input_path, temp_extract_path):
+            log_error("Failed to extract archive")
+            analyzer.cleanup_temp()
+            raise typer.Exit(1)
+
+        # Handle nested structures
+        work_path = analyzer.handle_nested_structure(temp_extract_path, structure_info)
+
+    try:
+        # Step 4: Compression with progress tracking
+        compressor = create_compressor()
+
+        with create_progress_manager() as progress:
+            progress.create_progress()
+
+            # Add compression task
+            progress.add_task("compression", "Compressing to tar.zst...", total=100)
+
+            # Perform compression
+            archive_path = organizer.get_output_file("archive")
+            success = compressor.compress_directory(
+                work_path,
+                archive_path,
+                level=level,
+                threads=threads,
+                long_mode=not no_long,
+                enable_check=not no_check,
+            )
+
+            progress.complete_task("compression")
+
+            if not success:
+                log_error("Compression failed")
+                organizer.cleanup_partial_files()
+                raise typer.Exit(1)
+
+        # Step 5: Generate integrity hashes
+        if not no_check:
+            hash_generator = create_hash_generator()
+            if not hash_generator.generate_and_save_hashes(archive_path):
+                log_error("Hash generation failed")
+                organizer.cleanup_partial_files()
+                raise typer.Exit(1)
+
+        # Step 6: Show completion summary
+        organizer.show_output_summary()
+
+        # Calculate final statistics
+        original_size = 0
+        if input_path.is_file():
+            original_size = input_path.stat().st_size
+        else:
+            original_size = sum(
+                f.stat().st_size for f in input_path.rglob("*") if f.is_file()
+            )
+
+        compressed_size = archive_path.stat().st_size
+        ratio = (1 - compressed_size / original_size) * 100 if original_size > 0 else 0
+
+        show_summary(
+            "Cold Storage Conversion Complete",
+            [
+                f"Original size: {original_size / (1024*1024):.1f} MB",
+                f"Compressed size: {compressed_size / (1024*1024):.1f} MB",
+                f"Compression ratio: {ratio:.1f}%",
+                f"Output location: {archive_path.parent}",
+                f"Archive: {archive_path.name}",
+                "Integrity files: SHA-256, BLAKE3"
+                + ("" if no_check else ", PAR2 (planned)"),
+            ],
+        )
+
+        log_success("Archive conversion completed successfully!")
+
+    finally:
+        # Cleanup temporary files
+        if hasattr(analyzer, "cleanup_temp"):
+            analyzer.cleanup_temp()
+        if hasattr(compressor, "cleanup_temp_tar"):
+            compressor.cleanup_temp_tar()

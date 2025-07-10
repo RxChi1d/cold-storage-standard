@@ -7,11 +7,8 @@ import typer
 
 from coldstore.logging import log_error, log_info, show_header
 
-app = typer.Typer(help="Extract archives (equivalent to extract-archive.sh)")
 
-
-@app.callback(invoke_without_command=True)
-def extract(
+def main(
     archive_path: Annotated[
         Path,
         typer.Argument(
@@ -48,7 +45,3 @@ def extract(
     # TODO: Implement actual extraction logic
     log_error("Extract functionality not yet implemented")
     raise typer.Exit(1)
-
-
-if __name__ == "__main__":
-    app()

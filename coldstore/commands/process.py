@@ -7,13 +7,8 @@ import typer
 
 from coldstore.logging import log_error, log_info, show_header
 
-app = typer.Typer(
-    help="Verify and extract archives (equivalent to verify-and-extract.sh)"
-)
 
-
-@app.callback(invoke_without_command=True)
-def process(
+def main(
     archive_path: Annotated[
         Path,
         typer.Argument(
@@ -52,7 +47,3 @@ def process(
     # TODO: Implement actual process logic
     log_error("Process functionality not yet implemented")
     raise typer.Exit(1)
-
-
-if __name__ == "__main__":
-    app()

@@ -7,11 +7,8 @@ import typer
 
 from coldstore.logging import log_error, log_info, show_header
 
-app = typer.Typer(help="Repair corrupted archives using PAR2")
 
-
-@app.callback(invoke_without_command=True)
-def repair(
+def main(
     archive_path: Annotated[
         Path,
         typer.Argument(
@@ -39,7 +36,3 @@ def repair(
     # TODO: Implement actual repair logic
     log_error("Repair functionality not yet implemented")
     raise typer.Exit(1)
-
-
-if __name__ == "__main__":
-    app()

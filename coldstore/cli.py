@@ -5,7 +5,6 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
-from coldstore.commands import extract, pack, process, repair, verify
 from coldstore.logging import setup_logging
 
 app = typer.Typer(
@@ -32,11 +31,24 @@ def main(
     setup_logging(verbose=verbose, quiet=quiet)
 
 
-app.add_typer(pack.app, name="pack", help="Convert archives to cold storage format")
-app.add_typer(verify.app, name="verify", help="Verify archive integrity")
-app.add_typer(extract.app, name="extract", help="Extract archives")
-app.add_typer(repair.app, name="repair", help="Repair corrupted archives using PAR2")
-app.add_typer(process.app, name="process", help="Verify and extract archives")
+def _register_commands():
+    """Register CLI commands to avoid circular imports."""
+    # Import commands after app is defined to avoid circular imports
+    from coldstore.commands.extract import main as extract_command
+    from coldstore.commands.pack import main as pack_command
+    from coldstore.commands.process import main as process_command
+    from coldstore.commands.repair import main as repair_command
+    from coldstore.commands.verify import main as verify_command
+
+    app.command("pack", help="Convert archives to cold storage format")(pack_command)
+    app.command("verify", help="Verify archive integrity")(verify_command)
+    app.command("extract", help="Extract archives")(extract_command)
+    app.command("repair", help="Repair corrupted archives using PAR2")(repair_command)
+    app.command("process", help="Verify and extract archives")(process_command)
+
+
+# Register commands
+_register_commands()
 
 
 if __name__ == "__main__":
