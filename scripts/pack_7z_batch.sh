@@ -1,18 +1,18 @@
 #!/bin/bash
 
-# 批量處理7z檔案的腳本
-# 功能：對指定資料夾中的每個7z檔案執行coldstore pack命令
+# Batch processing script for 7z files
+# Function: Execute coldstore pack command for each 7z file in specified directory
 
-set -e  # 遇到錯誤立即退出
+set -e  # Exit immediately on error
 
-# 顏色定義
+# Color definitions
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# 輔助函數
+# Helper functions
 log_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
 }
@@ -33,26 +33,26 @@ log_detail() {
     echo -e "${NC}[DETAIL]${NC} $1"
 }
 
-# 顯示使用說明
+# Show usage instructions
 show_usage() {
-    echo "使用方法: $0 <輸入資料夾路徑> [輸出資料夾路徑]"
+    echo "Usage: $0 <input_directory> [output_directory]"
     echo
-    echo "功能："
-    echo "  對指定資料夾中的每個7z檔案執行 'coldstore pack' 命令"
+    echo "Function:"
+    echo "  Execute 'coldstore pack' command for each 7z file in specified directory"
     echo
-    echo "參數："
-    echo "  <輸入資料夾路徑>    包含7z檔案的目錄路徑"
-    echo "  [輸出資料夾路徑]    處理後檔案的輸出目錄 (可選，預設為 'processed')"
+    echo "Parameters:"
+    echo "  <input_directory>     Directory path containing 7z files"
+    echo "  [output_directory]    Output directory for processed files (optional, defaults to 'processed')"
     echo
-    echo "範例："
-    echo "  $0 /path/to/archives                          # 輸出到預設目錄 'processed'"
-    echo "  $0 /path/to/archives /path/to/output          # 輸出到指定目錄"
-    echo "  $0 . ./output                                 # 當前目錄的7z檔案輸出到 ./output"
+    echo "Examples:"
+    echo "  $0 /path/to/archives                          # Output to default 'processed' directory"
+    echo "  $0 /path/to/archives /path/to/output          # Output to specified directory"
+    echo "  $0 . ./output                                 # Process current directory 7z files to ./output"
 }
 
-# 檢查參數
+# Check parameters
 if [ $# -eq 0 ]; then
-    log_error "缺少輸入資料夾路徑參數"
+    log_error "Missing input directory parameter"
     echo
     show_usage
     exit 1
@@ -64,92 +64,93 @@ if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
 fi
 
 INPUT_DIR="$1"
-OUTPUT_DIR="${2:-processed}"  # 如果沒有提供第二個參數，使用預設值 "processed"
+OUTPUT_DIR="${2:-processed}"  # Use default value "processed" if second parameter not provided
 
-# 檢查輸入目錄是否存在
+# Check if input directory exists
 if [ ! -d "$INPUT_DIR" ]; then
-    log_error "輸入目錄不存在: $INPUT_DIR"
+    log_error "Input directory does not exist: $INPUT_DIR"
     exit 1
 fi
 
-# 轉換為絕對路徑
+# Convert to absolute path
 INPUT_DIR=$(cd "$INPUT_DIR" && pwd)
-log_info "輸入目錄: $INPUT_DIR"
+log_info "Input directory: $INPUT_DIR"
 
-# 創建輸出目錄（如果不存在）
+# Create output directory if it doesn't exist
 if [ ! -d "$OUTPUT_DIR" ]; then
-    log_info "創建輸出目錄: $OUTPUT_DIR"
+    log_info "Creating output directory: $OUTPUT_DIR"
     mkdir -p "$OUTPUT_DIR" || {
-        log_error "無法創建輸出目錄: $OUTPUT_DIR"
+        log_error "Unable to create output directory: $OUTPUT_DIR"
         exit 1
     }
 fi
 
-# 轉換輸出目錄為絕對路徑
+# Convert output directory to absolute path
 OUTPUT_DIR=$(cd "$OUTPUT_DIR" && pwd)
-log_info "輸出目錄: $OUTPUT_DIR"
+log_info "Output directory: $OUTPUT_DIR"
 
-# 檢查coldstore命令是否可用
+# Check if coldstore command is available
 if ! command -v coldstore &> /dev/null; then
-    log_error "找不到 coldstore 命令。請確保已安裝並在PATH中"
+    log_error "coldstore command not found. Please ensure it's installed and in PATH"
     exit 1
 fi
 
-# 切換到輸入目錄
+# Change to input directory
 cd "$INPUT_DIR"
 
-# 找出所有7z檔案並計數
+# Find all 7z files and count them
 seven_zip_count=0
 temp_file=$(mktemp)
-# 簡單的清理：確保暫存檔案在腳本結束時被清理
+# Simple cleanup: ensure temp file is cleaned up when script exits
 trap 'rm -f "$temp_file"' EXIT
+
 find . -maxdepth 1 -name "*.7z" -type f | sort > "$temp_file"
 
-# 計算檔案數量
+# Count files
 while IFS= read -r line; do
     seven_zip_count=$((seven_zip_count + 1))
 done < "$temp_file"
 
 if [ $seven_zip_count -eq 0 ]; then
-    log_warning "在目錄 $INPUT_DIR 中沒有找到任何7z檔案"
+    log_warning "No 7z files found in directory $INPUT_DIR"
     exit 0
 fi
 
-log_info "找到 $seven_zip_count 個7z檔案"
+log_info "Found $seven_zip_count 7z files"
 
-# 處理每個7z檔案
+# Process each 7z file
 success_count=0
 error_count=0
 
 while IFS= read -r file; do
-    # 移除 ./ 前綴
+    # Remove ./ prefix
     clean_filename="${file#./}"
 
-    log_info "正在處理: $clean_filename -> $OUTPUT_DIR"
+    log_info "Processing: $clean_filename -> $OUTPUT_DIR"
 
     if coldstore pack -o "$OUTPUT_DIR" "$clean_filename"; then
-        log_success "成功處理: $clean_filename"
+        log_success "Successfully processed: $clean_filename"
         success_count=$((success_count + 1))
     else
-        log_error "處理失敗: $clean_filename"
+        log_error "Failed to process: $clean_filename"
         error_count=$((error_count + 1))
     fi
 
-    echo  # 空行分隔
+    echo  # Empty line separator
 done < "$temp_file"
 
-# 顯示結果摘要
-echo "======== 處理結果摘要 ========"
-log_info "總檔案數: $seven_zip_count"
-log_success "成功: $success_count"
+# Display result summary
+echo "======== Processing Summary ========"
+log_info "Total files: $seven_zip_count"
+log_success "Successful: $success_count"
 if [ $error_count -gt 0 ]; then
-    log_error "失敗: $error_count"
+    log_error "Failed: $error_count"
 fi
 
 if [ $error_count -eq 0 ]; then
-    log_success "所有檔案處理完成！"
+    log_success "All files processed successfully!"
     exit 0
 else
-    log_warning "部分檔案處理失敗，請檢查錯誤訊息"
+    log_warning "Some files failed to process, please check error messages"
     exit 1
 fi
