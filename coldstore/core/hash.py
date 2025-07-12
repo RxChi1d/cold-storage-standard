@@ -5,7 +5,7 @@ from pathlib import Path
 
 import blake3
 
-from coldstore.logging import log_detail, log_error, log_info, log_step, log_warning
+from coldstore.logging import log_error, log_info, log_step, log_warning
 
 
 class HashGenerator:
@@ -63,137 +63,126 @@ class HashGenerator:
             "blake3": self.generate_blake3(file_path),
         }
 
-    def save_hash_file(
-        self, hash_value: str, hash_file_path: Path, original_filename: str
-    ) -> bool:
-        """Save hash to file in standard format."""
+    def verify_sha256(self, file_path: Path, expected_hash: str) -> bool:
+        """Verify SHA-256 hash of file."""
         try:
-            with open(hash_file_path, "w") as f:
-                f.write(f"{hash_value}  {original_filename}\n")
+            log_step("Verifying SHA-256 hash")
 
-            log_detail(f"Hash saved to: {hash_file_path.name}")
-            return True
-
-        except Exception as e:
-            log_error(f"Failed to save hash file {hash_file_path}: {e}")
-            return False
-
-    def save_all_hash_files(
-        self, hashes: dict[str, str | None], base_file_path: Path
-    ) -> dict[str, bool]:
-        """Save both hash files."""
-        results = {}
-        original_filename = base_file_path.name
-
-        # Save SHA-256 hash
-        if hashes["sha256"]:
-            sha256_file = base_file_path.with_suffix(base_file_path.suffix + ".sha256")
-            results["sha256"] = self.save_hash_file(
-                hashes["sha256"], sha256_file, original_filename
-            )
-        else:
-            results["sha256"] = False
-
-        # Save BLAKE3 hash
-        if hashes["blake3"]:
-            blake3_file = base_file_path.with_suffix(base_file_path.suffix + ".blake3")
-            results["blake3"] = self.save_hash_file(
-                hashes["blake3"], blake3_file, original_filename
-            )
-        else:
-            results["blake3"] = False
-
-        return results
-
-    def verify_hash_file(self, hash_file_path: Path, target_file_path: Path) -> bool:
-        """Verify hash file against target file."""
-        try:
-            # Read expected hash
-            with open(hash_file_path) as f:
-                line = f.readline().strip()
-                if "  " in line:
-                    expected_hash, filename = line.split("  ", 1)
-                else:
-                    expected_hash = line.split()[0] if line else ""
-
-            if not expected_hash:
-                log_error(f"Invalid hash file format: {hash_file_path}")
-                return False
-
-            # Determine hash type and generate actual hash
-            if hash_file_path.suffix == ".sha256":
-                actual_hash = self.generate_sha256(target_file_path)
-                hash_type = "SHA-256"
-            elif hash_file_path.suffix == ".blake3":
-                actual_hash = self.generate_blake3(target_file_path)
-                hash_type = "BLAKE3"
-            else:
-                log_error(f"Unknown hash file type: {hash_file_path.suffix}")
-                return False
-
+            actual_hash = self.generate_sha256(file_path)
             if actual_hash is None:
                 return False
 
-            # Compare hashes
             if actual_hash.lower() == expected_hash.lower():
-                log_info(f"{hash_type} verification: PASS")
+                log_info("SHA-256 hash verification: PASSED")
                 return True
             else:
-                log_error(f"{hash_type} verification: FAIL")
-                log_detail(f"Expected: {expected_hash}")
-                log_detail(f"Actual:   {actual_hash}")
+                log_error("SHA-256 hash verification: FAILED")
+                log_error(f"Expected: {expected_hash}")
+                log_error(f"Actual:   {actual_hash}")
                 return False
 
         except Exception as e:
-            log_error(f"Failed to verify hash file {hash_file_path}: {e}")
+            log_error(f"SHA-256 hash verification failed: {e}")
             return False
 
-    def generate_and_save_hashes(self, file_path: Path) -> bool:
-        """Generate and save both hash files for a file."""
-        log_info(f"Generating integrity hashes for: {file_path.name}")
+    def verify_blake3(self, file_path: Path, expected_hash: str) -> bool:
+        """Verify BLAKE3 hash of file."""
+        try:
+            log_step("Verifying BLAKE3 hash")
 
-        # Generate hashes
-        hashes = self.generate_all_hashes(file_path)
+            actual_hash = self.generate_blake3(file_path)
+            if actual_hash is None:
+                return False
 
-        # Check if both hashes were generated successfully
-        if not hashes["sha256"] or not hashes["blake3"]:
-            log_error("Failed to generate one or more hashes")
+            if actual_hash.lower() == expected_hash.lower():
+                log_info("BLAKE3 hash verification: PASSED")
+                return True
+            else:
+                log_error("BLAKE3 hash verification: FAILED")
+                log_error(f"Expected: {expected_hash}")
+                log_error(f"Actual:   {actual_hash}")
+                return False
+
+        except Exception as e:
+            log_error(f"BLAKE3 hash verification failed: {e}")
             return False
 
-        # Save hash files
-        save_results = self.save_all_hash_files(hashes, file_path)
+    def read_hash_file(self, hash_file_path: Path) -> str | None:
+        """Read hash value from a hash file."""
+        try:
+            with open(hash_file_path) as f:
+                content = f.read().strip()
+                # Hash files typically contain: "hash_value  filename"
+                # We want just the hash value
+                hash_value = content.split()[0]
+                return hash_value
+        except Exception as e:
+            log_error(f"Failed to read hash file {hash_file_path}: {e}")
+            return None
 
-        # Check if both files were saved successfully
-        success = all(save_results.values())
+    def verify_all_hashes(self, file_path: Path) -> dict[str, bool]:
+        """Verify all hash files for the given archive."""
+        log_info(f"Verifying hashes for: {file_path.name}")
 
-        if success:
-            log_info("Hash generation and saving completed successfully")
-        else:
-            log_error("Failed to save one or more hash files")
-
-        return success
-
-    def verify_all_hashes(self, base_file_path: Path) -> dict[str, bool]:
-        """Verify all hash files for a given file."""
         results = {}
 
         # Check SHA-256
-        sha256_file = base_file_path.with_suffix(base_file_path.suffix + ".sha256")
+        sha256_file = file_path.with_suffix(file_path.suffix + ".sha256")
         if sha256_file.exists():
-            results["sha256"] = self.verify_hash_file(sha256_file, base_file_path)
+            expected_sha256 = self.read_hash_file(sha256_file)
+            if expected_sha256:
+                results["sha256"] = self.verify_sha256(file_path, expected_sha256)
+            else:
+                log_error(f"Could not read SHA-256 hash file: {sha256_file}")
+                results["sha256"] = False
         else:
-            results["sha256"] = False
             log_warning(f"SHA-256 hash file not found: {sha256_file}")
+            results["sha256"] = None
 
         # Check BLAKE3
-        blake3_file = base_file_path.with_suffix(base_file_path.suffix + ".blake3")
+        blake3_file = file_path.with_suffix(file_path.suffix + ".blake3")
         if blake3_file.exists():
-            results["blake3"] = self.verify_hash_file(blake3_file, base_file_path)
+            expected_blake3 = self.read_hash_file(blake3_file)
+            if expected_blake3:
+                results["blake3"] = self.verify_blake3(file_path, expected_blake3)
+            else:
+                log_error(f"Could not read BLAKE3 hash file: {blake3_file}")
+                results["blake3"] = False
         else:
-            results["blake3"] = False
             log_warning(f"BLAKE3 hash file not found: {blake3_file}")
+            results["blake3"] = None
 
         return results
+
+    def generate_and_save_hashes(self, file_path: Path) -> bool:
+        """Generate and save both SHA-256 and BLAKE3 hashes."""
+        try:
+            log_info(f"Generating and saving hashes for: {file_path.name}")
+
+            # Generate hashes
+            hashes = self.generate_all_hashes(file_path)
+
+            if hashes["sha256"] is None or hashes["blake3"] is None:
+                log_error("Failed to generate one or more hashes")
+                return False
+
+            # Save SHA-256 hash
+            sha256_file = file_path.with_suffix(file_path.suffix + ".sha256")
+            with open(sha256_file, "w") as f:
+                f.write(f"{hashes['sha256']}  {file_path.name}\n")
+            log_info(f"SHA-256 hash saved to: {sha256_file}")
+
+            # Save BLAKE3 hash
+            blake3_file = file_path.with_suffix(file_path.suffix + ".blake3")
+            with open(blake3_file, "w") as f:
+                f.write(f"{hashes['blake3']}  {file_path.name}\n")
+            log_info(f"BLAKE3 hash saved to: {blake3_file}")
+
+            return True
+
+        except Exception as e:
+            log_error(f"Failed to save hashes: {e}")
+            return False
 
 
 def create_hash_generator() -> HashGenerator:

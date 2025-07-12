@@ -49,7 +49,7 @@ coverage.xml
 
 # Virtual environments
 .env
-.venv
+.venv/
 env/
 venv/
 ENV/
@@ -81,3 +81,4 @@ processed/
 *.vol*.par2
 temp/
 tmp/
+output/

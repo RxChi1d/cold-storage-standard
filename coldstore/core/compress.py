@@ -1,6 +1,6 @@
 """Compression engine for separated mode (tar → zstd)."""
 
-import subprocess
+import tarfile
 import tempfile
 from pathlib import Path
 
@@ -18,31 +18,172 @@ class CompressionEngine:
         self.long_mode = True
         self.temp_tar_path: Path | None = None
 
+    def _estimate_data_size(self, source_path: Path, archive_path: Path = None) -> int:
+        """
+        Estimate data size using a balanced approach between performance and accuracy.
+
+        Strategy:
+        1. If source is a directory, quickly estimate by sampling
+        2. If archive_path provided, use as reference
+        3. Use the larger estimate for conservative window_log selection
+        """
+        estimates = []
+
+        # Method 1: Quick directory sampling (fast estimate)
+        if source_path.is_dir():
+            try:
+                # Sample first 100 files to estimate average size and total count
+                all_files = list(source_path.rglob("*"))
+                if all_files:
+                    sample_files = all_files[: min(100, len(all_files))]
+                    sample_size = sum(
+                        f.stat().st_size for f in sample_files if f.is_file()
+                    )
+
+                    if sample_files:
+                        avg_file_size = sample_size / len(
+                            [f for f in sample_files if f.is_file()]
+                        )
+                        total_files = len([f for f in all_files if f.is_file()])
+                        estimated_size = int(
+                            avg_file_size * total_files * 1.1
+                        )  # 10% overhead
+                        estimates.append(("directory_sampling", estimated_size))
+                        log_detail(
+                            f"Directory sampling estimate: {estimated_size / (1024*1024):.1f}MB"
+                        )
+            except Exception as e:
+                log_detail(f"Directory sampling failed: {e}")
+
+        # Method 2: Archive size reference (if available)
+        if archive_path and archive_path.exists():
+            archive_size = archive_path.stat().st_size
+            # Typical compression ratios: 7z usually 30-70% of original
+            # Estimate original size as 2-5x archive size (conservative)
+            estimated_original = int(archive_size * 3.5)  # Conservative multiplier
+            estimates.append(("archive_reference", estimated_original))
+            log_detail(
+                f"Archive reference estimate: {estimated_original / (1024*1024):.1f}MB"
+            )
+
+        # Use the larger estimate for conservative memory allocation
+        if estimates:
+            selected_estimate = max(estimates, key=lambda x: x[1])
+            log_detail(f"Selected estimate method: {selected_estimate[0]}")
+            return selected_estimate[1]
+        else:
+            # Fallback: assume moderate size
+            return 10 * 1024 * 1024  # 10MB default
+
+    def _calculate_optimal_window_log(self, file_size: int) -> int:
+        """
+        Calculate optimal window_log based on file size.
+
+        Window log guidelines (conservative for reliability):
+        - Small files (<2MB): window_log=20 (1MB window, ~1MB memory)
+        - Medium files (2-20MB): window_log=24 (16MB window, ~16MB memory)
+        - Large files (20-200MB): window_log=27 (128MB window, ~128MB memory)
+        - Very large files (>200MB): window_log=31 (2GB window, ~2GB memory)
+        """
+        if file_size < 2 * 1024 * 1024:  # < 2MB
+            return 20  # 1MB window
+        elif file_size < 20 * 1024 * 1024:  # < 20MB
+            return 24  # 16MB window
+        elif file_size < 200 * 1024 * 1024:  # < 200MB
+            return 27  # 128MB window
+        else:  # >= 200MB
+            return 31  # 2GB window (original --long=31)
+
+    def _get_sorted_file_list(self, directory: Path) -> list[tuple[Path, Path]]:
+        """
+        Get deterministic sorted file list (equivalent to tar --sort=name).
+
+        Returns:
+            List of (absolute_path, relative_path) tuples in sorted order
+        """
+        files = []
+
+        def add_files_recursively(current_dir: Path, relative_base: Path):
+            """Recursively add files to list in sorted order."""
+            try:
+                # Get all items in current directory and sort by name
+                items = sorted(current_dir.iterdir(), key=lambda x: x.name)
+
+                for item in items:
+                    # Calculate relative path from the base directory
+                    relative_path = item.relative_to(relative_base)
+                    files.append((item, relative_path))
+
+                    # If directory, recurse
+                    if item.is_dir():
+                        add_files_recursively(item, relative_base)
+
+            except (PermissionError, OSError) as e:
+                log_warning(f"Cannot access {current_dir}: {e}")
+
+        # Use the directory itself as the relative base to avoid including directory name
+        add_files_recursively(directory, directory)
+
+        # Sort by relative path for deterministic order
+        files.sort(key=lambda x: str(x[1]))
+
+        return files
+
     def create_deterministic_tar(self, source_path: Path, tar_path: Path) -> bool:
-        """Create deterministic tar archive with sorted file order."""
+        """Create deterministic tar archive using Python tarfile (cross-platform)."""
         try:
             log_step("Creating deterministic tar archive")
+            log_detail("Using Python tarfile for cross-platform compatibility")
+            log_detail("Applying deterministic sorting (equivalent to tar --sort=name)")
+            log_detail(f"Source path: {source_path}")
 
-            # Build tar command with deterministic options
-            cmd = [
-                "tar",
-                "--create",
-                "--file",
-                str(tar_path),
-                "--sort=name",  # Deterministic file order
-                "--numeric-owner",  # Use numeric IDs
-                "--owner=0",  # Set owner to 0
-                "--group=0",  # Set group to 0
-                "--mtime=@0",  # Set modification time to epoch
-                "--format=posix",  # Use POSIX format
-                "-C",
-                str(source_path.parent),
-                source_path.name,
-            ]
+            # Handle single file vs directory
+            if source_path.is_file():
+                # For single files, create a simple deterministic archive
+                with tarfile.open(tar_path, "w", format=tarfile.PAX_FORMAT) as tar:
+                    tarinfo = tar.gettarinfo(source_path, source_path.name)
 
-            log_detail(f"Tar command: {' '.join(cmd)}")
+                    # Set deterministic properties
+                    tarinfo.uid = 0
+                    tarinfo.gid = 0
+                    tarinfo.uname = "root"
+                    tarinfo.gname = "root"
+                    tarinfo.mtime = 0
 
-            subprocess.run(cmd, capture_output=True, text=True, check=True)
+                    with open(source_path, "rb") as f:
+                        tar.addfile(tarinfo, f)
+
+                log_detail("Single file archived with deterministic properties")
+            else:
+                # For directories, use deterministic file sorting
+                file_list = self._get_sorted_file_list(source_path)
+                log_detail(f"Found {len(file_list)} items to archive")
+                log_detail(
+                    "Archive will contain files relative to source directory (no parent path included)"
+                )
+
+                # Create tar archive with PAX format for better compatibility and large files
+                with tarfile.open(tar_path, "w", format=tarfile.PAX_FORMAT) as tar:
+                    for absolute_path, relative_path in file_list:
+                        try:
+                            tarinfo = tar.gettarinfo(absolute_path, str(relative_path))
+
+                            # Set deterministic properties (equivalent to tar behavior)
+                            tarinfo.uid = 0
+                            tarinfo.gid = 0
+                            tarinfo.uname = "root"
+                            tarinfo.gname = "root"
+                            tarinfo.mtime = 0
+
+                            if absolute_path.is_file():
+                                with open(absolute_path, "rb") as f:
+                                    tar.addfile(tarinfo, f)
+                            else:
+                                tar.addfile(tarinfo)
+
+                        except (OSError, ValueError) as e:
+                            log_warning(f"Skipping {relative_path}: {e}")
+                            continue
 
             # Verify tar file was created
             if not tar_path.exists():
@@ -51,32 +192,32 @@ class CompressionEngine:
 
             tar_size = tar_path.stat().st_size
             log_info(f"Tar archive created: {tar_size / (1024*1024):.1f} MB")
+            log_detail("✅ Cross-platform deterministic tar creation successful")
 
             return True
 
-        except subprocess.CalledProcessError as e:
+        except Exception as e:
             log_error(f"Failed to create tar archive: {e}")
-            if e.stderr:
-                log_detail(f"Error output: {e.stderr}")
             return False
 
     def verify_tar_integrity(self, tar_path: Path) -> bool:
-        """Verify tar archive integrity."""
+        """Verify tar archive integrity using Python tarfile (cross-platform)."""
         try:
             log_step("Verifying tar archive integrity")
+            log_detail("Using Python tarfile for cross-platform verification")
 
-            subprocess.run(
-                ["tar", "--test-label", "--file", str(tar_path)],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
+            # Attempt to open and list the tar file
+            with tarfile.open(tar_path, "r") as tar:
+                # Try to get the list of members to verify integrity
+                members = tar.getnames()
+                log_detail(f"Verified {len(members)} archive members")
 
             log_info("Tar archive integrity verified")
+            log_detail("✅ Cross-platform tar verification successful")
             return True
 
-        except subprocess.CalledProcessError:
-            log_error("Tar archive integrity check failed")
+        except Exception as e:
+            log_error(f"Tar archive integrity check failed: {e}")
             return False
 
     def compress_with_zstd(
@@ -91,18 +232,30 @@ class CompressionEngine:
         try:
             log_step(f"Compressing with zstd (level {level})")
 
-            # Configure zstd compressor
-            compression_params = {
-                "level": level,
-                "threads": threads if threads > 0 else -1,  # -1 = auto
-            }
-
-            # Add long-distance matching if enabled
+            # Configure zstd compression parameters
             if long_mode:
-                compression_params["window_log"] = 31  # --long=31
-                log_detail("Long-distance matching enabled (window_log=31)")
+                # Dynamically choose window_log based on file size
+                file_size = tar_path.stat().st_size
+                window_log = self._calculate_optimal_window_log(file_size)
 
-            compressor = zstd.ZstdCompressor(**compression_params)
+                log_detail(f"Long-distance matching enabled (window_log={window_log})")
+                log_detail(
+                    f"File size: {file_size / (1024*1024):.1f}MB, Window size: {2**window_log / (1024*1024):.0f}MB"
+                )
+
+                cparams = zstd.ZstdCompressionParameters(
+                    compression_level=level,
+                    window_log=window_log,
+                    threads=threads if threads > 0 else 0,  # 0 = auto
+                )
+                compressor = zstd.ZstdCompressor(compression_params=cparams)
+            else:
+                # Simple compression without long-distance matching
+                cparams = zstd.ZstdCompressionParameters(
+                    compression_level=level,
+                    threads=threads if threads > 0 else 0,  # 0 = auto
+                )
+                compressor = zstd.ZstdCompressor(compression_params=cparams)
 
             # Compress file
             with open(tar_path, "rb") as input_file, open(
@@ -130,16 +283,57 @@ class CompressionEngine:
             log_error(f"Failed to compress with zstd: {e}")
             return False
 
+    def get_zstd_window_log(self, zst_path: Path) -> int:
+        """
+        Get window_log from zstd file for appropriate decompression memory settings.
+
+        Returns:
+            window_log value, or 20 as safe default
+        """
+        try:
+            with open(zst_path, "rb") as f:
+                data = f.read(32)  # Read just the frame header
+                frame_params = zstd.get_frame_parameters(data)
+
+                if frame_params.window_size > 0:
+                    import math
+
+                    window_log = int(math.log2(frame_params.window_size))
+                    log_detail(
+                        f"Detected window_log={window_log} (~{frame_params.window_size // (1024*1024)}MB window)"
+                    )
+                    return window_log
+                else:
+                    log_detail("No window size info, using default")
+                    return 20
+
+        except Exception as e:
+            log_warning(f"Failed to read zstd frame parameters: {e}")
+            return 20  # Safe default
+
     def verify_zstd_integrity(self, zst_path: Path) -> bool:
-        """Verify zstd file integrity."""
+        """Verify zstd file integrity with appropriate memory settings."""
         try:
             log_step("Verifying zstd archive integrity")
+
+            # Get window_log to inform user about memory requirements
+            window_log = self.get_zstd_window_log(zst_path)
+
+            if window_log > 27:
+                memory_mb = (2**window_log) // (1024 * 1024)
+                log_detail(
+                    f"High compression detected: requires ~{memory_mb}MB memory for decompression"
+                )
 
             decompressor = zstd.ZstdDecompressor()
 
             with open(zst_path, "rb") as input_file:
-                # Test decompression without writing output
-                decompressor.stream_reader(input_file).read(1024)
+                # Test decompression without writing full output
+                reader = decompressor.stream_reader(input_file)
+                # Read small chunk to verify integrity
+                chunk = reader.read(1024)
+                if not chunk:
+                    raise ValueError("Empty or corrupted zstd file")
 
             log_info("Zstd archive integrity verified")
             return True
@@ -150,12 +344,11 @@ class CompressionEngine:
 
     def create_temp_tar(self, prefix: str = "coldstore_") -> Path:
         """Create temporary tar file path."""
-        temp_file = tempfile.NamedTemporaryFile(
+        with tempfile.NamedTemporaryFile(
             prefix=prefix, suffix=".tar", delete=False
-        )
-        temp_file.close()
-        self.temp_tar_path = Path(temp_file.name)
-        return self.temp_tar_path
+        ) as temp_file:
+            self.temp_tar_path = Path(temp_file.name)
+            return self.temp_tar_path
 
     def cleanup_temp_tar(self):
         """Clean up temporary tar file."""
@@ -221,6 +414,155 @@ class CompressionEngine:
             "long_mode": self.long_mode,
             "method": "separated (tar → zstd)",
         }
+
+    def decompress_with_zstd(self, zst_path: Path, tar_path: Path) -> bool:
+        """Decompress zstd file to tar file using detected window_log."""
+        try:
+            log_step(f"Decompressing zstd file: {zst_path.name}")
+
+            # Get window_log from the compressed file
+            window_log = self.get_zstd_window_log(zst_path)
+            memory_mb = (2**window_log) // (1024 * 1024)
+
+            log_detail(
+                f"Using window_log={window_log} (~{memory_mb}MB memory for decompression)"
+            )
+
+            if window_log > 27:
+                log_detail(f"High compression detected: requires ~{memory_mb}MB memory")
+
+            # Create decompressor with appropriate settings
+            decompressor = zstd.ZstdDecompressor()
+
+            # Decompress file
+            with open(zst_path, "rb") as input_file, open(
+                tar_path, "wb"
+            ) as output_file:
+                decompressor.copy_stream(input_file, output_file)
+
+            # Verify output file was created
+            if not tar_path.exists():
+                log_error("Tar file was not created during decompression")
+                return False
+
+            original_size = zst_path.stat().st_size
+            decompressed_size = tar_path.stat().st_size
+
+            log_info(
+                f"Decompression complete: {original_size / (1024*1024):.1f} MB → {decompressed_size / (1024*1024):.1f} MB"
+            )
+
+            return True
+
+        except Exception as e:
+            log_error(f"Failed to decompress zstd file: {e}")
+            return False
+
+    def extract_tar_archive(self, tar_path: Path, output_dir: Path) -> bool:
+        """Extract tar archive to output directory."""
+        try:
+            log_step(f"Extracting tar archive: {tar_path.name}")
+            log_detail("Using Python tarfile for cross-platform extraction")
+
+            # Create output directory if it doesn't exist
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            # Extract tar archive
+            with tarfile.open(tar_path, "r") as tar:
+                # Get list of members for safety check
+                members = tar.getmembers()
+
+                # Check for path traversal attacks
+                for member in members:
+                    if member.name.startswith("/") or ".." in member.name:
+                        log_warning(
+                            f"Skipping potentially dangerous path: {member.name}"
+                        )
+                        continue
+
+                # Extract all safe members
+                safe_members = [
+                    m for m in members if not (m.name.startswith("/") or ".." in m.name)
+                ]
+                tar.extractall(path=output_dir, members=safe_members)
+
+                log_info(f"Extracted {len(safe_members)} items to: {output_dir}")
+                log_detail("✅ Cross-platform tar extraction successful")
+
+            return True
+
+        except Exception as e:
+            log_error(f"Failed to extract tar archive: {e}")
+            return False
+
+    def decompress_archive(
+        self, zst_path: Path, output_dir: Path, enable_check: bool = True
+    ) -> bool:
+        """Complete two-stage decompression (zstd → tar → directory)."""
+        try:
+            log_info(f"Starting decompression: {zst_path} → {output_dir}")
+
+            # Step 1: Verify zstd integrity (optional)
+            if enable_check and not self.verify_zstd_integrity(zst_path):
+                log_error("Zstd integrity check failed")
+                return False
+
+            # Step 2: Create temporary tar file
+            temp_tar = self.create_temp_tar(prefix="coldstore_decompress_")
+
+            # Step 3: Decompress zstd to tar
+            if not self.decompress_with_zstd(zst_path, temp_tar):
+                return False
+
+            # Step 4: Verify tar integrity (optional)
+            if enable_check and not self.verify_tar_integrity(temp_tar):
+                log_error("Tar integrity check failed")
+                return False
+
+            # Step 5: Extract tar to output directory
+            if not self.extract_tar_archive(temp_tar, output_dir):
+                return False
+
+            log_info("Decompression completed successfully")
+            return True
+
+        except Exception as e:
+            log_error(f"Decompression failed: {e}")
+            return False
+
+        finally:
+            # Step 6: Clean up temporary files
+            self.cleanup_temp_tar()
+
+    def get_archive_info(self, zst_path: Path) -> dict:
+        """Get archive information without full extraction."""
+        try:
+            log_step("Getting archive information")
+
+            # Get compression info
+            window_log = self.get_zstd_window_log(zst_path)
+            memory_mb = (2**window_log) // (1024 * 1024)
+
+            # Get file sizes
+            compressed_size = zst_path.stat().st_size
+
+            return {
+                "compressed_size": compressed_size,
+                "window_log": window_log,
+                "memory_required_mb": memory_mb,
+                "format": "tar.zst",
+                "compression_level": "detected from file",
+            }
+
+        except Exception as e:
+            log_warning(f"Failed to get archive info: {e}")
+            return {
+                "compressed_size": zst_path.stat().st_size if zst_path.exists() else 0,
+                "window_log": 20,  # safe default
+                "memory_required_mb": 1,
+                "format": "tar.zst",
+                "compression_level": "unknown",
+            }
 
 
 def create_compressor() -> CompressionEngine:

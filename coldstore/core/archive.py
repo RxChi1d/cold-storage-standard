@@ -1,18 +1,20 @@
 """Archive handling and 7z structure detection."""
 
-import re
-import subprocess
 import tempfile
 from pathlib import Path
 
-from coldstore.logging import log_detail, log_error, log_info, log_step
+import py7zr
+
+from coldstore.logging import log_detail, log_error, log_info, log_step, log_warning
 
 
 class ArchiveAnalyzer:
     """Intelligent 7z structure detection and handling."""
 
     def __init__(self):
-        self.supported_formats = [".7z", ".zip", ".rar", ".tar", ".gz", ".bz2", ".xz"]
+        # py7zr supports these formats natively
+        self.supported_formats = [".7z", ".zip", ".tar", ".gz", ".bz2", ".xz"]
+        # Note: .rar support is limited in py7zr, may need additional handling
         self.temp_dir: Path | None = None
 
     def is_supported_archive(self, file_path: Path) -> bool:
@@ -22,17 +24,14 @@ class ArchiveAnalyzer:
         )
 
     def analyze_archive_structure(self, archive_path: Path) -> dict:
-        """Analyze 7z archive structure to detect nested folders."""
+        """Analyze archive structure to detect nested folders using py7zr."""
         try:
-            # Use 7z to list archive contents
-            result = subprocess.run(
-                ["7z", "l", "-slt", str(archive_path)],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
+            log_step(f"Analyzing archive structure: {archive_path.name}")
 
-            entries = self._parse_7z_listing(result.stdout)
+            # Use py7zr to list archive contents
+            with py7zr.SevenZipFile(archive_path, mode="r") as archive:
+                entries = self._extract_file_info_from_py7zr(archive)
+
             structure_info = self._analyze_structure(entries)
 
             log_info(f"Archive analysis complete: {len(entries)} entries")
@@ -40,7 +39,7 @@ class ArchiveAnalyzer:
 
             return structure_info
 
-        except subprocess.CalledProcessError as e:
+        except Exception as e:
             log_error(f"Failed to analyze archive: {e}")
             return {
                 "type": "unknown",
@@ -50,32 +49,28 @@ class ArchiveAnalyzer:
                 "entries": [],
             }
 
-    def _parse_7z_listing(self, listing_output: str) -> list[dict]:
-        """Parse 7z listing output to extract file information."""
+    def _extract_file_info_from_py7zr(self, archive: py7zr.SevenZipFile) -> list[dict]:
+        """Extract file information from py7zr archive object."""
         entries = []
-        current_entry = {}
 
-        for line in listing_output.split("\n"):
-            line = line.strip()
+        try:
+            # Get list of files in archive
+            file_list = archive.list()
 
-            if line.startswith("Path = "):
-                if current_entry:
-                    entries.append(current_entry)
-                current_entry = {
-                    "path": line[7:],
-                    "size": 0,
-                    "is_dir": False,
-                    "attributes": "",
+            for file_info in file_list:
+                # py7zr FileInfo object contains filename, is_directory, etc.
+                entry = {
+                    "path": file_info.filename,
+                    "size": file_info.uncompressed
+                    if hasattr(file_info, "uncompressed")
+                    else 0,
+                    "is_dir": file_info.is_directory,
+                    "attributes": "D" if file_info.is_directory else "A",
                 }
-            elif line.startswith("Size = "):
-                current_entry["size"] = int(line[7:]) if line[7:].isdigit() else 0
-            elif line.startswith("Attributes = "):
-                attrs = line[13:]
-                current_entry["attributes"] = attrs
-                current_entry["is_dir"] = "D" in attrs
+                entries.append(entry)
 
-        if current_entry:
-            entries.append(current_entry)
+        except Exception as e:
+            log_warning(f"Error reading archive contents: {e}")
 
         return entries
 
@@ -129,28 +124,24 @@ class ArchiveAnalyzer:
         }
 
     def extract_archive(self, archive_path: Path, extract_to: Path) -> bool:
-        """Extract archive to specified directory."""
+        """Extract archive to specified directory using py7zr."""
         try:
             log_step(f"Extracting archive: {archive_path.name}")
 
             # Create extraction directory
             extract_to.mkdir(parents=True, exist_ok=True)
 
-            # Extract using 7z
-            subprocess.run(
-                ["7z", "x", str(archive_path), f"-o{extract_to}", "-y"],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
+            # Extract using py7zr
+            with py7zr.SevenZipFile(archive_path, mode="r") as archive:
+                archive.extractall(path=extract_to)
 
             log_info(f"Archive extracted to: {extract_to}")
+            log_detail("✅ Cross-platform extraction using py7zr")
             return True
 
-        except subprocess.CalledProcessError as e:
+        except Exception as e:
             log_error(f"Failed to extract archive: {e}")
-            if e.stderr:
-                log_detail(f"Error output: {e.stderr}")
+            log_detail(f"Error details: {str(e)}")
             return False
 
     def handle_nested_structure(
@@ -190,31 +181,26 @@ class ArchiveAnalyzer:
             log_info("Temporary extraction directory cleaned up")
 
     def get_archive_info(self, archive_path: Path) -> dict:
-        """Get comprehensive archive information."""
+        """Get comprehensive archive information using py7zr."""
         try:
-            result = subprocess.run(
-                ["7z", "l", str(archive_path)],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
+            with py7zr.SevenZipFile(archive_path, mode="r") as archive:
+                file_list = archive.list()
 
-            # Parse basic info from output
-            lines = result.stdout.split("\n")
-            files_count = 0
-            folders_count = 0
-            total_size = 0
+                files_count = 0
+                folders_count = 0
+                total_size = 0
 
-            for line in lines:
-                if re.match(r"^\d{4}-\d{2}-\d{2}", line):
-                    parts = line.split()
-                    if len(parts) >= 5:
-                        if parts[3] == "D....":
-                            folders_count += 1
-                        else:
-                            files_count += 1
-                            if parts[3].isdigit():
-                                total_size += int(parts[3])
+                for file_info in file_list:
+                    if file_info.is_directory:
+                        folders_count += 1
+                    else:
+                        files_count += 1
+                        # Add file size if available
+                        if (
+                            hasattr(file_info, "uncompressed")
+                            and file_info.uncompressed
+                        ):
+                            total_size += file_info.uncompressed
 
             return {
                 "files": files_count,
@@ -223,7 +209,8 @@ class ArchiveAnalyzer:
                 "format": archive_path.suffix.lower(),
             }
 
-        except subprocess.CalledProcessError:
+        except Exception as e:
+            log_warning(f"Failed to get archive info: {e}")
             return {
                 "files": 0,
                 "folders": 0,

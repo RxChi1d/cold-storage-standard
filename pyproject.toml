@@ -33,11 +33,12 @@ dependencies = [
     "psutil>=7.0.0",
     "platformdirs>=4.0.0",
     "humanize>=4.0.0",
+    "py7zr>=1.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "ruff>=0.1.0",
+    "ruff>=0.12.3",
     "pytest>=8.4.1",
     "pytest-cov>=6.2.1",
     "pre-commit>=4.2.0",
@@ -118,5 +119,5 @@ exclude_lines = [
 [dependency-groups]
 dev = [
     "pre-commit>=4.2.0",
-    "ruff>=0.12.2",
+    "ruff>=0.12.3",
 ]
