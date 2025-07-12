@@ -127,6 +127,12 @@ class FileOrganizer:
 
     def show_output_summary(self):
         """Show summary of output files and their status."""
+        # Import here to avoid circular imports
+        from coldstore.logging import _should_show_detail
+
+        if not _should_show_detail():
+            return
+
         log_step("Output file summary:")
 
         for file_type, file_path in self.output_files.items():

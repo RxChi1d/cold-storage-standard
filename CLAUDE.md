@@ -158,10 +158,10 @@ coldstore process --verify-only archive.tar.zst
 **Python Application:**
 ```bash
 # Multi-layer integrity verification
-coldstore verify -v archive.tar.zst
+coldstore -v verify archive.tar.zst
 
 # Batch verification with detailed output
-coldstore verify -d /backup/archives -v
+coldstore -v verify -d /backup/archives
 
 # Test complete workflow
 coldstore process --verify-only archive.tar.zst
@@ -290,7 +290,7 @@ Each processed archive creates:
 **Always verify integrity before extraction:**
 ```bash
 # Using coldstore (recommended)
-coldstore verify -v archive.tar.zst
+coldstore -v verify archive.tar.zst
 
 # Using legacy scripts
 ./verify-archive.sh -v archive.tar.zst

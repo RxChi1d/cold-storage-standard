@@ -20,6 +20,7 @@ console = Console()
 
 @app.callback()
 def main(
+    ctx: typer.Context,
     verbose: Annotated[
         bool, typer.Option("--verbose", "-v", help="Enable verbose output")
     ] = False,
@@ -28,6 +29,11 @@ def main(
     ] = False,
 ):
     """Cold Storage Standard CLI."""
+    # Store global options in context for commands to access
+    ctx.ensure_object(dict)
+    ctx.obj["verbose"] = verbose
+    ctx.obj["quiet"] = quiet
+
     setup_logging(verbose=verbose, quiet=quiet)
 
 

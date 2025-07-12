@@ -93,12 +93,10 @@ def main(
         log_info("Starting integrity verification...")
 
         try:
-            verification_results = verify_single_archive(archive_path, verbose=True)
+            verification_results = verify_single_archive(archive_path)
 
             # Show verification results
-            show_verification_results(
-                {archive_path.name: verification_results}, verbose=True
-            )
+            show_verification_results({archive_path.name: verification_results})
 
             # Check if verification passed
             has_failures = any(r is False for r in verification_results.values())

@@ -16,6 +16,10 @@ from rich.text import Text
 
 console = Console()
 
+# Global verbosity control
+_verbose = False
+_quiet = False
+
 # Color scheme matching bash script
 COLORS = {
     "info": "bright_blue",
@@ -30,11 +34,25 @@ COLORS = {
 
 def setup_logging(verbose: bool = False, quiet: bool = False):
     """Set up logging configuration matching bash script behavior."""
+    global _verbose, _quiet
+
+    # Store global verbosity state
+    _verbose = verbose
+    _quiet = quiet
+
     # Remove default logger
     logger.remove()
 
-    # Set log level based on flags
-    if quiet:
+    # Handle conflicting options
+    if verbose and quiet:
+        console.print(
+            "[yellow]⚠[/yellow] Warning: Both --verbose and --quiet specified. "
+            "Using --quiet (suppressing verbose output)."
+        )
+        # quiet takes precedence
+        level = "WARNING"
+        _verbose = False  # Override verbose when conflict
+    elif quiet:
         level = "WARNING"
     elif verbose:
         level = "DEBUG"
@@ -55,40 +73,57 @@ def setup_logging(verbose: bool = False, quiet: bool = False):
     )
 
 
+def _should_show_info() -> bool:
+    """Check if info messages should be shown."""
+    return not _quiet
+
+
+def _should_show_detail() -> bool:
+    """Check if detail messages should be shown."""
+    return _verbose and not _quiet
+
+
 def log_info(message: str, prefix: str = "ℹ"):
     """Log info message (blue-green color like bash log_info)."""
-    console.print(f"[{COLORS['info']}]{prefix}[/{COLORS['info']}] {message}")
+    if _should_show_info():
+        console.print(f"[{COLORS['info']}]{prefix}[/{COLORS['info']}] {message}")
 
 
 def log_success(message: str, prefix: str = "✓"):
     """Log success message (green color like bash log_success)."""
-    console.print(f"[{COLORS['success']}]{prefix}[/{COLORS['success']}] {message}")
+    if _should_show_info():
+        console.print(f"[{COLORS['success']}]{prefix}[/{COLORS['success']}] {message}")
 
 
 def log_warning(message: str, prefix: str = "⚠"):
     """Log warning message (yellow color like bash log_warning)."""
+    # Warnings always show (even in quiet mode)
     console.print(f"[{COLORS['warning']}]{prefix}[/{COLORS['warning']}] {message}")
 
 
 def log_error(message: str, prefix: str = "✗"):
     """Log error message (red color like bash log_error)."""
+    # Errors always show (even in quiet mode)
     console.print(f"[{COLORS['error']}]{prefix}[/{COLORS['error']}] {message}")
 
 
 def log_step(message: str, step_num: int | None = None):
     """Log step message (blue color like bash log_step)."""
-    prefix = f"[{step_num}]" if step_num else "▶"
-    console.print(f"[{COLORS['step']}]{prefix}[/{COLORS['step']}] {message}")
+    if _should_show_info():
+        prefix = f"[{step_num}]" if step_num else "▶"
+        console.print(f"[{COLORS['step']}]{prefix}[/{COLORS['step']}] {message}")
 
 
 def log_detail(message: str, prefix: str = "  "):
     """Log detail message (gray color like bash log_detail)."""
-    console.print(f"[{COLORS['detail']}]{prefix}{message}[/{COLORS['detail']}]")
+    if _should_show_detail():
+        console.print(f"[{COLORS['detail']}]{prefix}{message}[/{COLORS['detail']}]")
 
 
 def log_progress(message: str):
     """Log progress message (magenta color like bash log_progress)."""
-    console.print(f"[{COLORS['progress']}]⏳[/{COLORS['progress']}] {message}")
+    if _should_show_info():
+        console.print(f"[{COLORS['progress']}]⏳[/{COLORS['progress']}] {message}")
 
 
 def create_progress_bar(description: str = "Processing...") -> Progress:
@@ -106,33 +141,35 @@ def create_progress_bar(description: str = "Processing...") -> Progress:
 
 def show_header(title: str, subtitle: str = ""):
     """Display header panel like bash script headers."""
-    header_text = Text(title, style="bold bright_blue")
-    if subtitle:
-        header_text.append(f"\n{subtitle}", style="dim")
+    if _should_show_info():
+        header_text = Text(title, style="bold bright_blue")
+        if subtitle:
+            header_text.append(f"\n{subtitle}", style="dim")
 
-    console.print(
-        Panel(
-            header_text,
-            border_style="bright_blue",
-            padding=(1, 2),
+        console.print(
+            Panel(
+                header_text,
+                border_style="bright_blue",
+                padding=(1, 2),
+            )
         )
-    )
 
 
 def show_summary(title: str, items: list[str]):
     """Display summary panel like bash script statistics."""
-    summary_text = Text()
-    for item in items:
-        summary_text.append(f"• {item}\n", style="dim")
+    if _should_show_info():
+        summary_text = Text()
+        for item in items:
+            summary_text.append(f"• {item}\n", style="dim")
 
-    console.print(
-        Panel(
-            summary_text,
-            title=title,
-            border_style="bright_green",
-            padding=(1, 2),
+        console.print(
+            Panel(
+                summary_text,
+                title=title,
+                border_style="bright_green",
+                padding=(1, 2),
+            )
         )
-    )
 
 
 def confirm_action(message: str, default: bool = True) -> bool:

@@ -1,4 +1,4 @@
-"""Verify command - Verify archive integrity."""
+"""Verify command - Archive integrity verification."""
 
 from pathlib import Path
 from typing import Annotated
@@ -9,7 +9,9 @@ from rich.table import Table
 from coldstore.core.compress import create_compressor
 from coldstore.core.hash import create_hash_generator
 from coldstore.logging import (
+    _should_show_info,
     console,
+    log_detail,
     log_error,
     log_info,
     log_success,
@@ -18,37 +20,60 @@ from coldstore.logging import (
 )
 
 
-def verify_single_archive(archive_path: Path, verbose: bool = False) -> dict[str, bool]:
-    """Verify a single archive file."""
-    log_info(f"Verifying archive: {archive_path.name}")
+def verify_single_archive(archive_path: Path) -> dict[str, bool]:
+    """Verify a single archive file.
+
+    Returns a dictionary with verification results for each check.
+    """
+    log_detail(f"Starting verification of: {archive_path}")
 
     results = {
-        "zstd_integrity": False,
+        "zstd_integrity": None,
         "sha256_hash": None,
         "blake3_hash": None,
-        "tar_integrity": False,
+        "tar_integrity": None,
     }
 
-    # Step 1: Verify zstd integrity
+    # Initialize components
     compressor = create_compressor()
-    try:
-        results["zstd_integrity"] = compressor.verify_zstd_integrity(archive_path)
-    except Exception as e:
-        log_error(f"Zstd integrity check failed: {e}")
-        results["zstd_integrity"] = False
-
-    # Step 2: Verify hash files
     hash_generator = create_hash_generator()
+
+    # Step 1: Get archive info (includes basic zstd validity check)
+    log_detail("Checking zstd header and basic integrity...")
     try:
+        archive_info = compressor.get_archive_info(archive_path)
+        results["zstd_integrity"] = True
+        log_detail(f"Archive info: {archive_info}")
+    except Exception as e:
+        log_error(f"Failed to read archive header: {e}")
+        results["zstd_integrity"] = False
+        return results  # Can't continue without valid zstd
+
+    # Step 2: Hash verification
+    log_detail("Verifying hashes...")
+    try:
+        # Verify all hashes at once
         hash_results = hash_generator.verify_all_hashes(archive_path)
         results["sha256_hash"] = hash_results.get("sha256")
         results["blake3_hash"] = hash_results.get("blake3")
+
+        if results["sha256_hash"]:
+            log_detail("SHA-256 hash verification: PASSED")
+        else:
+            log_detail("SHA-256 hash verification: FAILED")
+
+        if results["blake3_hash"]:
+            log_detail("BLAKE3 hash verification: PASSED")
+        else:
+            log_detail("BLAKE3 hash verification: FAILED")
+
     except Exception as e:
         log_error(f"Hash verification failed: {e}")
         results["sha256_hash"] = False
         results["blake3_hash"] = False
 
     # Step 3: Verify tar integrity (through decompression test)
+    log_detail("Testing tar integrity through decompression...")
     try:
         # Create a temporary tar file to test decompression
         temp_tar = compressor.create_temp_tar(prefix="verify_")
@@ -56,8 +81,12 @@ def verify_single_archive(archive_path: Path, verbose: bool = False) -> dict[str
         # Test decompression (this will verify tar integrity)
         if compressor.decompress_with_zstd(archive_path, temp_tar):
             results["tar_integrity"] = compressor.verify_tar_integrity(temp_tar)
+            log_detail(
+                f"Tar integrity verification: {'PASSED' if results['tar_integrity'] else 'FAILED'}"
+            )
         else:
             results["tar_integrity"] = False
+            log_detail("Tar integrity verification: FAILED (decompression failed)")
 
         # Clean up
         compressor.cleanup_temp_tar()
@@ -69,10 +98,11 @@ def verify_single_archive(archive_path: Path, verbose: bool = False) -> dict[str
     return results
 
 
-def show_verification_results(
-    results: dict[str, dict[str, bool]], verbose: bool = False
-):
+def show_verification_results(results: dict[str, dict[str, bool]]):
     """Display verification results in a table."""
+    if not _should_show_info():
+        return
+
     table = Table(title="Archive Verification Results")
     table.add_column("Archive", style="cyan")
     table.add_column("Zstd", style="white")
@@ -127,6 +157,7 @@ def show_verification_results(
 
 
 def main(
+    ctx: typer.Context,
     archive_path: Annotated[
         Path,
         typer.Argument(
@@ -138,12 +169,6 @@ def main(
     directory: Annotated[
         bool, typer.Option("--directory", "-d", help="Verify all archives in directory")
     ] = False,
-    verbose: Annotated[
-        bool, typer.Option("--verbose", "-v", help="Show detailed verification output")
-    ] = False,
-    quiet: Annotated[
-        bool, typer.Option("--quiet", "-q", help="Suppress non-essential output")
-    ] = False,
 ):
     """Verify archive integrity.
 
@@ -154,12 +179,13 @@ def main(
     4. tar content verification
 
     Equivalent to verify-archive.sh functionality.
+
+    Note: Use global --verbose/-v and --quiet/-q flags for output control.
     """
     show_header("Cold Storage Standard - Verify", f"Verifying: {archive_path}")
 
     log_info(f"Archive: {archive_path}")
     log_info(f"Mode: {'directory batch' if directory else 'single file'}")
-    log_info(f"Verbose: {'enabled' if verbose else 'disabled'}")
 
     results = {}
 
@@ -181,7 +207,7 @@ def main(
         # Verify each archive
         for archive_file in archive_files:
             try:
-                file_results = verify_single_archive(archive_file, verbose)
+                file_results = verify_single_archive(archive_file)
                 results[archive_file.name] = file_results
             except Exception as e:
                 log_error(f"Failed to verify {archive_file.name}: {e}")
@@ -198,7 +224,7 @@ def main(
             raise typer.Exit(1)
 
         try:
-            file_results = verify_single_archive(archive_path, verbose)
+            file_results = verify_single_archive(archive_path)
             results[archive_path.name] = file_results
         except Exception as e:
             log_error(f"Failed to verify {archive_path.name}: {e}")
@@ -210,8 +236,7 @@ def main(
             }
 
     # Display results
-    if not quiet:
-        show_verification_results(results, verbose)
+    show_verification_results(results)
 
     # Calculate summary statistics
     total_archives = len(results)
@@ -226,18 +251,17 @@ def main(
             passed_archives += 1
 
     # Show summary
-    if not quiet:
-        show_summary(
-            "Cold Storage Verification Complete",
-            [
-                f"Total archives: {total_archives}",
-                f"Passed: {passed_archives}",
-                f"Failed: {failed_archives}",
-                f"Success rate: {(passed_archives/total_archives)*100:.1f}%"
-                if total_archives > 0
-                else "N/A",
-            ],
-        )
+    show_summary(
+        "Cold Storage Verification Complete",
+        [
+            f"Total archives: {total_archives}",
+            f"Passed: {passed_archives}",
+            f"Failed: {failed_archives}",
+            f"Success rate: {(passed_archives/total_archives)*100:.1f}%"
+            if total_archives > 0
+            else "N/A",
+        ],
+    )
 
     if failed_archives > 0:
         log_error(f"Verification failed for {failed_archives} archive(s)")
