@@ -8,6 +8,7 @@ from rich.table import Table
 
 from coldstore.core.compress import create_compressor
 from coldstore.core.hash import create_hash_generator
+from coldstore.core.par2 import PAR2Engine
 from coldstore.logging import (
     _should_show_info,
     console,
@@ -32,6 +33,7 @@ def verify_single_archive(archive_path: Path) -> dict[str, bool]:
         "sha256_hash": None,
         "blake3_hash": None,
         "tar_integrity": None,
+        "par2_integrity": None,
     }
 
     # Initialize components
@@ -95,6 +97,34 @@ def verify_single_archive(archive_path: Path) -> dict[str, bool]:
         log_error(f"Tar integrity check failed: {e}")
         results["tar_integrity"] = False
 
+    # Step 4: Verify PAR2 integrity (if available)
+    log_detail("Checking PAR2 integrity...")
+    try:
+        # Look for PAR2 file
+        par2_file = archive_path.parent / f"{archive_path.name}.par2"
+
+        if par2_file.exists():
+            try:
+                par2_engine = PAR2Engine()
+                par2_result = par2_engine.verify_par2(str(par2_file))
+                results["par2_integrity"] = par2_result["success"]
+
+                if results["par2_integrity"]:
+                    log_detail("PAR2 integrity verification: PASSED")
+                else:
+                    log_detail("PAR2 integrity verification: FAILED")
+
+            except Exception as e:
+                log_detail(f"PAR2 verification failed: {e}")
+                results["par2_integrity"] = False
+        else:
+            log_detail("PAR2 file not found - skipping PAR2 verification")
+            results["par2_integrity"] = None
+
+    except Exception as e:
+        log_error(f"PAR2 integrity check failed: {e}")
+        results["par2_integrity"] = False
+
     return results
 
 
@@ -109,6 +139,7 @@ def show_verification_results(results: dict[str, dict[str, bool]]):
     table.add_column("SHA-256", style="white")
     table.add_column("BLAKE3", style="white")
     table.add_column("Tar", style="white")
+    table.add_column("PAR2", style="white")
     table.add_column("Overall", style="white")
 
     for archive_name, result in results.items():
@@ -150,6 +181,7 @@ def show_verification_results(results: dict[str, dict[str, bool]]):
             format_result(result["sha256_hash"]),
             format_result(result["blake3_hash"]),
             format_result(result["tar_integrity"]),
+            format_result(result["par2_integrity"]),
             overall_status,
         )
 
@@ -177,6 +209,7 @@ def main(
     2. SHA-256 hash verification
     3. BLAKE3 hash verification
     4. tar content verification
+    5. PAR2 recovery verification (if available)
 
     Equivalent to verify-archive.sh functionality.
 
@@ -216,6 +249,7 @@ def main(
                     "sha256_hash": False,
                     "blake3_hash": False,
                     "tar_integrity": False,
+                    "par2_integrity": False,
                 }
     else:
         # Single file verification
@@ -233,6 +267,7 @@ def main(
                 "sha256_hash": False,
                 "blake3_hash": False,
                 "tar_integrity": False,
+                "par2_integrity": False,
             }
 
     # Display results

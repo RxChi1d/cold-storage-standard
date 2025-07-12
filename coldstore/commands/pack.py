@@ -9,12 +9,16 @@ from coldstore.core.archive import create_analyzer
 from coldstore.core.compress import create_compressor
 from coldstore.core.hash import create_hash_generator
 from coldstore.core.organizer import create_organizer
+
+# PAR2 functionality is now handled directly by the PAR2Engine class
 from coldstore.core.progress import create_progress_manager
 from coldstore.core.system import check_system_requirements
 from coldstore.logging import (
+    log_detail,
     log_error,
     log_info,
     log_success,
+    log_warning,
     show_header,
     show_summary,
 )
@@ -72,6 +76,20 @@ def main(
             "--no-check", help="Skip integrity verification after compression"
         ),
     ] = False,
+    no_par2: Annotated[
+        bool,
+        typer.Option("--no-par2", help="Skip PAR2 recovery file generation"),
+    ] = False,
+    recovery_percent: Annotated[
+        int,
+        typer.Option(
+            "--recovery-percent",
+            "-r",
+            help="PAR2 recovery percentage (1-100, default: 10)",
+            min=1,
+            max=100,
+        ),
+    ] = 10,
 ):
     """Convert archives to cold storage format.
 
@@ -96,6 +114,9 @@ def main(
     log_info(f"Structure: {'flat' if flat else 'organized'}")
     log_info(f"Long-distance matching: {'disabled' if no_long else 'enabled'}")
     log_info(f"Integrity check: {'disabled' if no_check else 'enabled'}")
+    log_info(
+        f"PAR2 recovery: {'disabled' if no_par2 else f'enabled ({recovery_percent}%)'}"
+    )
 
     # Step 1: System requirements check
     log_info("Checking system requirements...")
@@ -194,7 +215,33 @@ def main(
                 organizer.cleanup_partial_files()
                 raise typer.Exit(1)
 
-        # Step 6: Show completion summary
+        # Step 6: Generate PAR2 recovery files
+        par2_generated = False
+        par2_error = None
+        if not no_par2:
+            try:
+                from coldstore.core.par2 import PAR2Engine
+
+                par2_engine = PAR2Engine(recovery_percent=recovery_percent)
+                par2_files = par2_engine.generate_par2(
+                    str(archive_path), str(archive_path.parent)
+                )
+
+                if par2_files:
+                    par2_generated = True
+                    log_info(f"Generated {len(par2_files)} PAR2 recovery files")
+                    # Log each PAR2 file
+                    for par2_file in par2_files:
+                        log_detail(f"Created: {Path(par2_file).name}")
+                else:
+                    log_warning("No PAR2 files were generated")
+
+            except Exception as e:
+                par2_error = str(e)
+                log_error(f"PAR2 generation failed: {e}")
+                log_info("Continuing without PAR2 recovery files")
+
+        # Step 7: Show completion summary
         organizer.show_output_summary()
 
         # Calculate final statistics
@@ -218,11 +265,16 @@ def main(
                 f"Output location: {archive_path.parent}",
                 f"Archive: {archive_path.name}",
                 "Integrity files: SHA-256, BLAKE3"
-                + ("" if no_check else ", PAR2 (planned)"),
+                + (", PAR2" if par2_generated else ""),
             ],
         )
 
-        log_success("Archive conversion completed successfully!")
+        if par2_error:
+            log_warning(
+                f"Archive conversion completed with warnings (PAR2 generation failed: {par2_error})"
+            )
+        else:
+            log_success("Archive conversion completed successfully!")
 
     finally:
         # Cleanup temporary files

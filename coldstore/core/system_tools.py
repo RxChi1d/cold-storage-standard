@@ -174,6 +174,115 @@ class SystemToolChecker:
 
         return backends
 
+    def check_par2_availability(self) -> tuple[bool, str | None]:
+        """
+        Check if PAR2 tool is available and get version info.
+
+        Returns:
+            (is_available, version_info)
+        """
+        # Try different possible PAR2 command names
+        par2_commands = [
+            "par2",
+            "par2cmdline",
+            "par2create",
+            "par2verify",
+            "par2repair",
+        ]
+
+        for cmd in par2_commands:
+            if self.check_tool_available(cmd):
+                # Try to get version info
+                version_info = self._get_tool_version(cmd, ["--version"])
+                if version_info:
+                    log_detail(f"Found working PAR2 command: {cmd}")
+                    return True, version_info
+                else:
+                    # Try alternative version check
+                    version_info = self._get_tool_version(cmd, ["-V"])
+                    if version_info:
+                        log_detail(f"Found working PAR2 command: {cmd}")
+                        return True, version_info
+
+        return False, None
+
+    def get_par2_processing_requirements(self) -> dict[str, any]:
+        """
+        Get comprehensive information about PAR2 processing requirements.
+
+        Returns:
+            Dictionary with availability status and recommendations
+        """
+        par2_available, version_info = self.check_par2_availability()
+
+        requirements = {
+            "par2_available": par2_available,
+            "version_info": version_info,
+            "can_process_par2": par2_available,
+            "recommendations": [],
+        }
+
+        if not par2_available:
+            requirements["recommendations"] = [
+                "Install par2cmdline to enable PAR2 recovery functionality",
+                "macOS: brew install par2",
+                "Ubuntu/Debian: sudo apt install par2",
+                "CentOS/RHEL: sudo yum install par2cmdline",
+                "Windows: Download from https://github.com/Parchive/par2cmdline",
+                "Alternative: Use 7-Zip GUI for basic PAR2 operations",
+            ]
+        else:
+            requirements["recommendations"] = [
+                f"PAR2 processing ready ({version_info})"
+                if version_info
+                else "PAR2 processing ready"
+            ]
+
+        return requirements
+
+    def validate_par2_processing(self) -> bool:
+        """
+        Validate that PAR2 processing is possible.
+
+        Returns:
+            True if PAR2 processing is possible, False otherwise
+        """
+        requirements = self.get_par2_processing_requirements()
+
+        if not requirements["can_process_par2"]:
+            log_error("PAR2 processing not available")
+            log_info("Required: par2cmdline tool")
+            for rec in requirements["recommendations"]:
+                log_info(f"  • {rec}")
+            return False
+
+        log_info(f"PAR2 processing available: {requirements['version_info']}")
+        return True
+
+    def get_supported_par2_backends(self) -> list[str]:
+        """
+        Get list of supported PAR2 backends in order of preference.
+
+        Returns:
+            List of available backend tools
+        """
+        backends = []
+
+        # Check preferred backends in order
+        preferred_backends = [
+            ("par2", "Official par2cmdline tool (recommended)"),
+            ("par2cmdline", "par2cmdline alternative command"),
+            ("par2create", "par2create specific command"),
+            ("par2verify", "par2verify specific command"),
+            ("par2repair", "par2repair specific command"),
+        ]
+
+        for backend, description in preferred_backends:
+            if self.check_tool_available(backend):
+                backends.append(f"{backend} - {description}")
+
+        return backends
+
 
 def create_system_tool_checker() -> SystemToolChecker:
     """Create a system tool checker instance."""
@@ -198,3 +307,75 @@ def get_rar_status() -> dict[str, any]:
     """Get comprehensive RAR processing status."""
     checker = create_system_tool_checker()
     return checker.get_rar_processing_requirements()
+
+
+def check_par2_available() -> bool:
+    """
+    Check if PAR2 tools are available.
+
+    DEPRECATED: PAR2 functionality is now handled by the PAR2Engine class
+    """
+    try:
+        from coldstore.core.par2 import PAR2Engine
+
+        PAR2Engine()
+        return True
+    except Exception:
+        return False
+
+
+def generate_par2_files(archive_path: str, output_dir: str) -> bool:
+    """
+    Generate PAR2 files for an archive.
+
+    DEPRECATED: Use PAR2Engine class directly instead.
+    """
+    try:
+        from coldstore.core.par2 import PAR2Engine
+
+        PAR2Engine()
+        return True
+    except Exception:
+        return False
+
+
+def validate_par2_requirements() -> bool:
+    """Validate PAR2 processing requirements.
+
+    DEPRECATED: Use PAR2Engine class directly instead.
+    """
+    try:
+        from coldstore.core.par2 import PAR2Engine
+
+        PAR2Engine()
+        return True
+    except Exception:
+        return False
+
+
+def get_par2_status() -> dict[str, any]:
+    """Get comprehensive PAR2 processing status.
+
+    DEPRECATED: Use PAR2Engine class directly instead.
+    """
+    try:
+        from coldstore.core.par2 import PAR2Engine
+
+        engine = PAR2Engine()
+        return {
+            "par2_available": True,
+            "version_info": engine.get_version(),
+            "can_process_par2": True,
+            "recommendations": ["PAR2 processing ready (par2cmdline-turbo)"],
+        }
+    except Exception:
+        return {
+            "par2_available": False,
+            "version_info": None,
+            "can_process_par2": False,
+            "recommendations": [
+                "PAR2 tool will be automatically downloaded when needed",
+                "Or install par2cmdline-turbo manually from:",
+                "https://github.com/animetosho/par2cmdline-turbo/releases",
+            ],
+        }

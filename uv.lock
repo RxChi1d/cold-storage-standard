@@ -212,6 +212,7 @@ dependencies = [
     { name = "blake3" },
     { name = "humanize" },
     { name = "loguru" },
+    { name = "par2cmdline-turbo" },
     { name = "platformdirs" },
     { name = "psutil" },
     { name = "py7zr" },
@@ -241,6 +242,7 @@ requires-dist = [
     { name = "blake3", specifier = ">=1.0.5" },
     { name = "humanize", specifier = ">=4.0.0" },
     { name = "loguru", specifier = ">=0.7.0" },
+    { name = "par2cmdline-turbo", specifier = ">=1.3.0" },
     { name = "platformdirs", specifier = ">=4.0.0" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.2.0" },
     { name = "psutil", specifier = ">=7.0.0" },
@@ -484,6 +486,20 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a1/d4/1fc4078c65507b51b96ca8f8c3ba19e6a61c8253c72794544580a7b6c24d/packaging-25.0.tar.gz", hash = "sha256:d443872c98d677bf60f6a1f2f8c1cb748e8fe762d2bf9d3148b5599295b0fc4f", size = 165727 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/20/12/38679034af332785aac8774540895e234f4d07f7545804097de4b666afd8/packaging-25.0-py3-none-any.whl", hash = "sha256:29572ef2b1f17581046b3a2227d5c611fb25ec70ca1ba8554b24b0e69331a484", size = 66469 },
+]
+
+[[package]]
+name = "par2cmdline-turbo"
+version = "1.3.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/dd/bd/7f39e5a766662663d9ff02db76fd4f0bca49a3e9b1344f99a40a0a91e7e7/par2cmdline_turbo-1.3.0-py3-none-macosx_10_9_x86_64.whl", hash = "sha256:5a614ff85593efdb6654cb397fdb2e8e8ff115fef7a295f363e8bec732ba8e95", size = 364974 },
+    { url = "https://files.pythonhosted.org/packages/17/56/6d3348230648fed9d0ceb90377a7b730fff7ee62c5caaf15d37988aeebdb/par2cmdline_turbo-1.3.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:6e2a037f3db805a3ede4f82aebfecca2d2c653f09910bca6e7531d05d7c7b87a", size = 235867 },
+    { url = "https://files.pythonhosted.org/packages/87/74/1c2127727879dc93aa322802d551aa9083f49fe219fadce707870eb20056/par2cmdline_turbo-1.3.0-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:c01ffedb6f1573fb33d8665a29e4f2e65a5753249563fd5cb4b99110524bbae9", size = 951876 },
+    { url = "https://files.pythonhosted.org/packages/42/13/04b582bbf451b652623d2505baea96a4b459fb0de9c9dc38f6075c8f4ae6/par2cmdline_turbo-1.3.0-py3-none-manylinux_2_17_armv7l.whl", hash = "sha256:fdca7092936d98494177a8f1b5e82995f99e2c027d2ebfa0c3051061e81fa7d8", size = 789952 },
+    { url = "https://files.pythonhosted.org/packages/5a/5b/4ac8dac3829935000b01da80380fbf352aeb6b4eb5e8a38acf08f455fd83/par2cmdline_turbo-1.3.0-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:5c3337d7c5139b9feff3fa1242e65f55754018f433253e6b082702998c56f31a", size = 1178283 },
+    { url = "https://files.pythonhosted.org/packages/22/65/c3e56dcea492fcea043d375078146a6451483109739e2ad011e37da91e23/par2cmdline_turbo-1.3.0-py3-none-win_amd64.whl", hash = "sha256:22b7efa6cae104d8cdbebc6c645c49c84ecaa6b2ee04f5dcf5be66224e6e5974", size = 645187 },
+    { url = "https://files.pythonhosted.org/packages/f4/ad/01bfc8b1ad0c41be276781e8a57fae4106a6216e0aa1384301c23708aa85/par2cmdline_turbo-1.3.0-py3-none-win_arm64.whl", hash = "sha256:90d9023bd57eeebf5ea310f9eefef4e662a2688b3c190e93ae5f3636518ebf03", size = 454058 },
 ]
 
 [[package]]
