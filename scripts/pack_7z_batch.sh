@@ -29,6 +29,10 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+log_detail() {
+    echo -e "${NC}[DETAIL]${NC} $1"
+}
+
 # 顯示使用說明
 show_usage() {
     echo "使用方法: $0 <輸入資料夾路徑> [輸出資料夾路徑]"
@@ -97,6 +101,8 @@ cd "$INPUT_DIR"
 # 找出所有7z檔案並計數
 seven_zip_count=0
 temp_file=$(mktemp)
+# 簡單的清理：確保暫存檔案在腳本結束時被清理
+trap 'rm -f "$temp_file"' EXIT
 find . -maxdepth 1 -name "*.7z" -type f | sort > "$temp_file"
 
 # 計算檔案數量
@@ -106,7 +112,6 @@ done < "$temp_file"
 
 if [ $seven_zip_count -eq 0 ]; then
     log_warning "在目錄 $INPUT_DIR 中沒有找到任何7z檔案"
-    rm -f "$temp_file"
     exit 0
 fi
 
@@ -132,9 +137,6 @@ while IFS= read -r file; do
 
     echo  # 空行分隔
 done < "$temp_file"
-
-# 清理臨時檔案
-rm -f "$temp_file"
 
 # 顯示結果摘要
 echo "======== 處理結果摘要 ========"

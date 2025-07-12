@@ -1,7 +1,6 @@
 """Compression engine for separated mode (tar → zstd)."""
 
 import tarfile
-import tempfile
 from pathlib import Path
 
 import zstandard as zstd
@@ -345,17 +344,20 @@ class CompressionEngine:
 
     def create_temp_tar(self, prefix: str = "coldstore_") -> Path:
         """Create temporary tar file path."""
-        with tempfile.NamedTemporaryFile(
-            prefix=prefix, suffix=".tar", delete=False
-        ) as temp_file:
-            self.temp_tar_path = Path(temp_file.name)
-            return self.temp_tar_path
+        from coldstore.core.cleanup import create_managed_temp_file
+
+        self.temp_tar_path = create_managed_temp_file(prefix=prefix, suffix=".tar")
+        return self.temp_tar_path
 
     def cleanup_temp_tar(self):
         """Clean up temporary tar file."""
         if self.temp_tar_path and self.temp_tar_path.exists():
+            from coldstore.core.cleanup import get_cleanup_manager
+
             try:
                 self.temp_tar_path.unlink()
+                # Remove from cleanup manager since we cleaned it manually
+                get_cleanup_manager().remove_temp_file(self.temp_tar_path)
                 log_detail("Temporary tar file cleaned up")
             except OSError as e:
                 log_warning(f"Failed to cleanup temp tar file: {e}")

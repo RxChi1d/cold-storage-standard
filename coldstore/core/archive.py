@@ -1,6 +1,5 @@
 """Archive handling with unified multi-format support."""
 
-import tempfile
 from pathlib import Path
 
 from coldstore.core.format_detector import ArchiveFormat, create_format_detector
@@ -242,7 +241,9 @@ class ArchiveAnalyzer:
     def prepare_extraction_temp(self) -> Path:
         """Create temporary directory for extraction."""
         if self.temp_dir is None:
-            self.temp_dir = Path(tempfile.mkdtemp(prefix="coldstore_"))
+            from coldstore.core.cleanup import create_managed_temp_dir
+
+            self.temp_dir = create_managed_temp_dir(prefix="coldstore_extract_")
         return self.temp_dir
 
     def cleanup_temp(self):
@@ -250,9 +251,17 @@ class ArchiveAnalyzer:
         if self.temp_dir and self.temp_dir.exists():
             import shutil
 
-            shutil.rmtree(self.temp_dir)
-            self.temp_dir = None
-            log_info("Temporary extraction directory cleaned up")
+            from coldstore.core.cleanup import get_cleanup_manager
+
+            try:
+                shutil.rmtree(self.temp_dir)
+                # Remove from cleanup manager since we cleaned it manually
+                get_cleanup_manager().remove_temp_directory(self.temp_dir)
+                log_info("Temporary extraction directory cleaned up")
+            except OSError as e:
+                log_warning(f"Failed to cleanup temp directory: {e}")
+            finally:
+                self.temp_dir = None
 
     def get_archive_info(self, archive_path: Path) -> dict[str, any]:
         """Get comprehensive archive information using appropriate handler."""

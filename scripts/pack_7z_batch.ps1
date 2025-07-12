@@ -58,6 +58,11 @@ function Write-LogError {
     Write-Host "[ERROR] $Message" -ForegroundColor Red
 }
 
+function Write-LogDetail {
+    param([string]$Message)
+    Write-Host "[DETAIL] $Message" -ForegroundColor Gray
+}
+
 function Show-Usage {
     Write-Host ""
     Write-Host "使用方法: .\pack_7z_batch.ps1 <輸入資料夾路徑> [輸出資料夾路徑]" -ForegroundColor Cyan
