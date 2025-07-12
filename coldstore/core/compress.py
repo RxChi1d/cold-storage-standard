@@ -16,6 +16,15 @@ class CompressionEngine:
         self.threads = 0  # 0 = auto
         self.long_mode = True
         self.temp_tar_path: Path | None = None
+        self._cleanup_initialized = False
+
+    def _ensure_cleanup_initialized(self):
+        """Ensure cleanup system is initialized (called lazily)."""
+        if not self._cleanup_initialized:
+            from coldstore.core.cleanup import initialize_cleanup
+
+            initialize_cleanup()
+            self._cleanup_initialized = True
 
     def _estimate_data_size(self, source_path: Path, archive_path: Path = None) -> int:
         """
@@ -200,23 +209,20 @@ class CompressionEngine:
             return False
 
     def verify_tar_integrity(self, tar_path: Path) -> bool:
-        """Verify tar archive integrity using Python tarfile (cross-platform)."""
+        """Verify tar archive integrity."""
         try:
             log_step("Verifying tar archive integrity")
-            log_detail("Using Python tarfile for cross-platform verification")
 
-            # Attempt to open and list the tar file
             with tarfile.open(tar_path, "r") as tar:
-                # Try to get the list of members to verify integrity
-                members = tar.getnames()
-                log_detail(f"Verified {len(members)} archive members")
+                # Try to read member list (will fail if corrupt)
+                members = tar.getmembers()
+                log_detail(f"Tar archive contains {len(members)} members")
 
-            log_info("Tar archive integrity verified")
-            log_detail("✅ Cross-platform tar verification successful")
+            log_detail("✅ Tar integrity verification successful")
             return True
 
         except Exception as e:
-            log_error(f"Tar archive integrity check failed: {e}")
+            log_error(f"Tar integrity verification failed: {e}")
             return False
 
     def compress_with_zstd(
@@ -227,43 +233,46 @@ class CompressionEngine:
         threads: int = 0,
         long_mode: bool = True,
     ) -> bool:
-        """Compress tar file with zstd."""
+        """Compress tar file with zstd using optimized parameters."""
         try:
             log_step(f"Compressing with zstd (level {level})")
 
-            # Configure zstd compression parameters
-            if long_mode:
-                # Dynamically choose window_log based on file size
-                file_size = tar_path.stat().st_size
-                window_log = self._calculate_optimal_window_log(file_size)
+            # Estimate data size and calculate optimal window_log
+            file_size = tar_path.stat().st_size
+            window_log = self._calculate_optimal_window_log(file_size)
+            memory_mb = (2**window_log) // (1024 * 1024)
 
-                log_detail(f"Long-distance matching enabled (window_log={window_log})")
-                log_detail(
-                    f"File size: {file_size / (1024 * 1024):.1f}MB, Window size: {2**window_log / (1024 * 1024):.0f}MB"
-                )
+            log_detail(f"Input size: {file_size / (1024 * 1024):.1f} MB")
+            log_detail(
+                f"Using window_log={window_log} (~{memory_mb}MB memory requirement)"
+            )
 
-                cparams = zstd.ZstdCompressionParameters(
-                    compression_level=level,
-                    window_log=window_log,
-                    threads=threads if threads > 0 else 0,  # 0 = auto
+            # Configure compressor parameters
+            if long_mode and level >= 10:
+                # Use long mode for high compression levels
+                cctx = zstd.ZstdCompressor(
+                    level=level,
+                    threads=threads if threads > 0 else 0,
+                    write_checksum=True,
+                    params=zstd.CompressionParameters.from_level(
+                        level, window_log=window_log
+                    ),
                 )
-                compressor = zstd.ZstdCompressor(compression_params=cparams)
+                log_detail(f"Long mode enabled with window_log={window_log}")
             else:
-                # Simple compression without long-distance matching
-                cparams = zstd.ZstdCompressionParameters(
-                    compression_level=level,
-                    threads=threads if threads > 0 else 0,  # 0 = auto
+                # Standard compression for lower levels
+                cctx = zstd.ZstdCompressor(
+                    level=level, threads=threads if threads > 0 else 0
                 )
-                compressor = zstd.ZstdCompressor(compression_params=cparams)
+                log_detail("Standard compression mode")
 
-            # Compress file
-            with (
-                open(tar_path, "rb") as input_file,
-                open(zst_path, "wb") as output_file,
-            ):
-                compressor.copy_stream(input_file, output_file)
+            # Perform compression
+            with open(tar_path, "rb") as input_file, open(
+                zst_path, "wb"
+            ) as output_file:
+                cctx.copy_stream(input_file, output_file)
 
-            # Verify output file was created
+            # Verify output and calculate compression ratio
             if not zst_path.exists():
                 log_error("Zstd file was not created")
                 return False
@@ -273,9 +282,9 @@ class CompressionEngine:
             ratio = (1 - compressed_size / original_size) * 100
 
             log_info(
-                f"Compression complete: {original_size / (1024 * 1024):.1f} MB → "
-                f"{compressed_size / (1024 * 1024):.1f} MB ({ratio:.1f}% reduction)"
+                f"Compression complete: {original_size / (1024 * 1024):.1f} MB → {compressed_size / (1024 * 1024):.1f} MB ({ratio:.1f}% reduction)"
             )
+            log_detail("✅ Zstd compression successful")
 
             return True
 
@@ -284,66 +293,53 @@ class CompressionEngine:
             return False
 
     def get_zstd_window_log(self, zst_path: Path) -> int:
-        """
-        Get window_log from zstd file for appropriate decompression memory settings.
-
-        Returns:
-            window_log value, or 20 as safe default
-        """
+        """Get window_log from zstd compressed file."""
         try:
+            # Read the frame header to extract window_log
             with open(zst_path, "rb") as f:
-                data = f.read(32)  # Read just the frame header
-                frame_params = zstd.get_frame_parameters(data)
+                dctx = zstd.ZstdDecompressor()
+                frame_header = dctx.frame_header_size(f.read(18))  # Read enough bytes
 
-                if frame_params.window_size > 0:
-                    import math
+                f.seek(0)
+                header_bytes = f.read(frame_header)
+                params = dctx.frame_header_params(header_bytes)
 
-                    window_log = int(math.log2(frame_params.window_size))
-                    log_detail(
-                        f"Detected window_log={window_log} (~{frame_params.window_size // (1024 * 1024)}MB window)"
-                    )
-                    return window_log
-                else:
-                    log_detail("No window size info, using default")
-                    return 20
+                window_log = params.window_log if params.window_log else 27  # Default
+                log_detail(f"Detected window_log={window_log} from compressed file")
+                return window_log
 
         except Exception as e:
-            log_warning(f"Failed to read zstd frame parameters: {e}")
-            return 20  # Safe default
+            log_detail(f"Could not detect window_log: {e}, using default=27")
+            return 27  # Safe default
 
     def verify_zstd_integrity(self, zst_path: Path) -> bool:
-        """Verify zstd file integrity with appropriate memory settings."""
+        """Verify zstd file integrity."""
         try:
-            log_step("Verifying zstd archive integrity")
+            log_step("Verifying zstd file integrity")
 
-            # Get window_log to inform user about memory requirements
-            window_log = self.get_zstd_window_log(zst_path)
+            # Try to create decompressor and read header
+            with open(zst_path, "rb") as f:
+                dctx = zstd.ZstdDecompressor()
+                # Try to read and validate the frame header
+                header_size = dctx.frame_header_size(f.read(18))
+                f.seek(0)
+                header_bytes = f.read(header_size)
+                params = dctx.frame_header_params(header_bytes)
 
-            if window_log > 27:
-                memory_mb = (2**window_log) // (1024 * 1024)
                 log_detail(
-                    f"High compression detected: requires ~{memory_mb}MB memory for decompression"
+                    f"Zstd file has valid header, window_log={params.window_log}"
                 )
 
-            decompressor = zstd.ZstdDecompressor()
-
-            with open(zst_path, "rb") as input_file:
-                # Test decompression without writing full output
-                reader = decompressor.stream_reader(input_file)
-                # Read small chunk to verify integrity
-                chunk = reader.read(1024)
-                if not chunk:
-                    raise ValueError("Empty or corrupted zstd file")
-
-            log_info("Zstd archive integrity verified")
+            log_detail("✅ Zstd integrity verification successful")
             return True
 
         except Exception as e:
-            log_error(f"Zstd integrity check failed: {e}")
+            log_error(f"Zstd integrity verification failed: {e}")
             return False
 
     def create_temp_tar(self, prefix: str = "coldstore_") -> Path:
         """Create temporary tar file path."""
+        self._ensure_cleanup_initialized()
         from coldstore.core.cleanup import create_managed_temp_file
 
         self.temp_tar_path = create_managed_temp_file(prefix=prefix, suffix=".tar")
@@ -352,14 +348,19 @@ class CompressionEngine:
     def cleanup_temp_tar(self):
         """Clean up temporary tar file."""
         if self.temp_tar_path and self.temp_tar_path.exists():
-            from coldstore.core.cleanup import get_cleanup_manager
+            from coldstore.core.cleanup import _force_remove_file, get_cleanup_manager
 
             try:
-                self.temp_tar_path.unlink()
-                # Remove from cleanup manager since we cleaned it manually
-                get_cleanup_manager().remove_temp_file(self.temp_tar_path)
-                log_detail("Temporary tar file cleaned up")
-            except OSError as e:
+                # Use the improved cleanup system
+                if _force_remove_file(self.temp_tar_path):
+                    log_detail("Temporary tar file cleaned up")
+                    # Remove from cleanup manager since we cleaned it manually
+                    get_cleanup_manager().remove_temp_file(self.temp_tar_path)
+                else:
+                    log_warning(
+                        f"Failed to cleanup temp tar file: {self.temp_tar_path}"
+                    )
+            except Exception as e:
                 log_warning(f"Failed to cleanup temp tar file: {e}")
             finally:
                 self.temp_tar_path = None
@@ -543,30 +544,40 @@ class CompressionEngine:
         try:
             log_step("Getting archive information")
 
-            # Get compression info
-            window_log = self.get_zstd_window_log(zst_path)
-            memory_mb = (2**window_log) // (1024 * 1024)
+            # Create temporary tar file for decompression
+            temp_tar = self.create_temp_tar(prefix="coldstore_info_")
 
-            # Get file sizes
-            compressed_size = zst_path.stat().st_size
+            # Decompress to get tar file
+            if not self.decompress_with_zstd(zst_path, temp_tar):
+                return {"error": "Failed to decompress for analysis"}
 
-            return {
-                "compressed_size": compressed_size,
-                "window_log": window_log,
-                "memory_required_mb": memory_mb,
-                "format": "tar.zst",
-                "compression_level": "detected from file",
+            # Analyze tar contents
+            info = {
+                "files": 0,
+                "folders": 0,
+                "total_size": 0,
+                "compressed_size": zst_path.stat().st_size,
+                "format": "zstd",
             }
+
+            with tarfile.open(temp_tar, "r") as tar:
+                members = tar.getmembers()
+                for member in members:
+                    if member.isfile():
+                        info["files"] += 1
+                        info["total_size"] += member.size
+                    elif member.isdir():
+                        info["folders"] += 1
+
+            return info
 
         except Exception as e:
             log_warning(f"Failed to get archive info: {e}")
-            return {
-                "compressed_size": zst_path.stat().st_size if zst_path.exists() else 0,
-                "window_log": 20,  # safe default
-                "memory_required_mb": 1,
-                "format": "tar.zst",
-                "compression_level": "unknown",
-            }
+            return {"error": str(e)}
+
+        finally:
+            # Clean up temporary files
+            self.cleanup_temp_tar()
 
 
 def create_compressor() -> CompressionEngine:

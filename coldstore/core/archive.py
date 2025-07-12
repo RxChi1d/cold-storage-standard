@@ -15,6 +15,15 @@ class ArchiveAnalyzer:
         self.handler: BaseArchiveHandler | None = None
         self.temp_dir: Path | None = None
         self.detected_format: ArchiveFormat | None = None
+        self._cleanup_initialized = False
+
+    def _ensure_cleanup_initialized(self):
+        """Ensure cleanup system is initialized (called lazily)."""
+        if not self._cleanup_initialized:
+            from coldstore.core.cleanup import initialize_cleanup
+
+            initialize_cleanup()
+            self._cleanup_initialized = True
 
     def is_supported_archive(self, file_path: Path) -> bool:
         """Check if file is a supported archive format."""
@@ -241,6 +250,7 @@ class ArchiveAnalyzer:
     def prepare_extraction_temp(self) -> Path:
         """Create temporary directory for extraction."""
         if self.temp_dir is None:
+            self._ensure_cleanup_initialized()
             from coldstore.core.cleanup import create_managed_temp_dir
 
             self.temp_dir = create_managed_temp_dir(prefix="coldstore_extract_")
@@ -249,16 +259,20 @@ class ArchiveAnalyzer:
     def cleanup_temp(self):
         """Clean up temporary extraction directory."""
         if self.temp_dir and self.temp_dir.exists():
-            import shutil
-
-            from coldstore.core.cleanup import get_cleanup_manager
+            from coldstore.core.cleanup import (
+                _force_remove_directory,
+                get_cleanup_manager,
+            )
 
             try:
-                shutil.rmtree(self.temp_dir)
-                # Remove from cleanup manager since we cleaned it manually
-                get_cleanup_manager().remove_temp_directory(self.temp_dir)
-                log_info("Temporary extraction directory cleaned up")
-            except OSError as e:
+                # Use the improved cleanup system
+                if _force_remove_directory(self.temp_dir):
+                    log_info("Temporary extraction directory cleaned up")
+                    # Remove from cleanup manager since we cleaned it manually
+                    get_cleanup_manager().remove_temp_directory(self.temp_dir)
+                else:
+                    log_warning(f"Failed to cleanup temp directory: {self.temp_dir}")
+            except Exception as e:
                 log_warning(f"Failed to cleanup temp directory: {e}")
             finally:
                 self.temp_dir = None

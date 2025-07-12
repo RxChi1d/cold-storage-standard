@@ -1,13 +1,130 @@
 """Cleanup manager for temporary resources - ensures cleanup on signal interruption."""
 
 import atexit
+import platform
 import signal
 import tempfile
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
 from coldstore.logging import log_detail, log_info, log_warning
+
+
+def _force_remove_file(file_path: Path, max_retries: int = 3) -> bool:
+    """
+    Force remove a file with retry logic for Windows file locking issues.
+
+    Args:
+        file_path: Path to the file to remove
+        max_retries: Maximum number of retry attempts
+
+    Returns:
+        True if successfully removed, False otherwise
+    """
+    for attempt in range(max_retries):
+        try:
+            if file_path.exists():
+                # Try to remove read-only attribute on Windows
+                if platform.system() == "Windows":
+                    try:
+                        import stat
+
+                        file_path.chmod(stat.S_IWRITE)
+                    except (OSError, PermissionError):
+                        pass
+
+                file_path.unlink()
+                return True
+            return True  # File doesn't exist, consider it removed
+        except (OSError, PermissionError) as e:
+            if attempt < max_retries - 1:
+                # Wait a bit before retrying (helps with antivirus/indexing conflicts)
+                time.sleep(0.1 * (attempt + 1))
+                continue
+            else:
+                log_warning(
+                    f"Failed to remove file {file_path} after {max_retries} attempts: {e}"
+                )
+                return False
+    return False
+
+
+def _force_remove_directory(dir_path: Path, max_retries: int = 3) -> bool:
+    """
+    Force remove a directory with retry logic for Windows file locking issues.
+
+    Args:
+        dir_path: Path to the directory to remove
+        max_retries: Maximum number of retry attempts
+
+    Returns:
+        True if successfully removed, False otherwise
+    """
+    import shutil
+
+    for attempt in range(max_retries):
+        try:
+            if dir_path.exists():
+                # On Windows, try to remove read-only attributes recursively
+                if platform.system() == "Windows":
+                    try:
+                        import stat
+
+                        def handle_remove_readonly(func, path, exc):
+                            if exc[1].errno == 13:  # Permission denied
+                                Path(path).chmod(stat.S_IWRITE)
+                                func(path)
+                            else:
+                                raise
+
+                        shutil.rmtree(dir_path, onerror=handle_remove_readonly)
+                    except Exception:
+                        # Fall back to normal removal
+                        shutil.rmtree(dir_path)
+                else:
+                    shutil.rmtree(dir_path)
+                return True
+            return True  # Directory doesn't exist, consider it removed
+        except (OSError, PermissionError) as e:
+            if attempt < max_retries - 1:
+                # Wait progressively longer before retrying
+                time.sleep(0.2 * (attempt + 1))
+                continue
+            else:
+                log_warning(
+                    f"Failed to remove directory {dir_path} after {max_retries} attempts: {e}"
+                )
+                # Try to remove individual files that can be removed
+                _cleanup_directory_contents(dir_path)
+                return False
+    return False
+
+
+def _cleanup_directory_contents(dir_path: Path):
+    """
+    Try to clean up as many files as possible from a directory.
+    This is a fallback when the entire directory can't be removed.
+    """
+    if not dir_path.exists():
+        return
+
+    removed_count = 0
+    total_count = 0
+
+    try:
+        for item in dir_path.rglob("*"):
+            total_count += 1
+            if item.is_file() and _force_remove_file(item, max_retries=1):
+                removed_count += 1
+    except (OSError, PermissionError):
+        pass
+
+    if removed_count > 0:
+        log_detail(
+            f"Partially cleaned directory {dir_path}: removed {removed_count}/{total_count} items"
+        )
 
 
 class CleanupManager:
@@ -96,34 +213,44 @@ class CleanupManager:
                 self._temp_files.remove(temp_file)
 
     def cleanup_temp_directories(self):
-        """Clean up all registered temporary directories."""
-        import shutil
-
+        """Clean up all registered temporary directories with improved error handling."""
         with self._lock:
             directories_to_clean = list(self._temp_directories)
             self._temp_directories.clear()
 
+        success_count = 0
+        failed_count = 0
+
         for temp_dir in directories_to_clean:
-            try:
-                if temp_dir.exists():
-                    shutil.rmtree(temp_dir)
-                    log_detail(f"Cleaned up temp directory: {temp_dir}")
-            except OSError as e:
-                log_warning(f"Failed to cleanup temp directory {temp_dir}: {e}")
+            if _force_remove_directory(temp_dir):
+                log_detail(f"Cleaned up temp directory: {temp_dir}")
+                success_count += 1
+            else:
+                failed_count += 1
+
+        if failed_count > 0:
+            log_warning(
+                f"Failed to fully cleanup {failed_count} temp directories (some files may remain)"
+            )
 
     def cleanup_temp_files(self):
-        """Clean up all registered temporary files."""
+        """Clean up all registered temporary files with improved error handling."""
         with self._lock:
             files_to_clean = list(self._temp_files)
             self._temp_files.clear()
 
+        success_count = 0
+        failed_count = 0
+
         for temp_file in files_to_clean:
-            try:
-                if temp_file.exists():
-                    temp_file.unlink()
-                    log_detail(f"Cleaned up temp file: {temp_file}")
-            except OSError as e:
-                log_warning(f"Failed to cleanup temp file {temp_file}: {e}")
+            if _force_remove_file(temp_file):
+                log_detail(f"Cleaned up temp file: {temp_file}")
+                success_count += 1
+            else:
+                failed_count += 1
+
+        if failed_count > 0:
+            log_warning(f"Failed to cleanup {failed_count} temp files")
 
     def cleanup_callbacks(self):
         """Execute all registered cleanup callbacks."""
@@ -176,71 +303,68 @@ class CleanupManager:
         except OSError:
             pass  # Skip if we can't access temp directory
 
-        # Clean up orphaned items
-        for orphaned_dir in orphaned_dirs:
-            try:
-                import shutil
+        # Clean up orphaned items with improved error handling
+        cleaned_dirs = 0
+        cleaned_files = 0
 
-                shutil.rmtree(orphaned_dir)
-                log_detail(f"Cleaned up orphaned temp directory: {orphaned_dir}")
-            except OSError:
-                pass
+        for orphaned_dir in orphaned_dirs:
+            if _force_remove_directory(orphaned_dir, max_retries=1):
+                cleaned_dirs += 1
 
         for orphaned_file in orphaned_files:
-            try:
-                orphaned_file.unlink()
-                log_detail(f"Cleaned up orphaned temp file: {orphaned_file}")
-            except OSError:
-                pass
+            if _force_remove_file(orphaned_file, max_retries=1):
+                cleaned_files += 1
 
-        if orphaned_dirs or orphaned_files:
+        if cleaned_dirs > 0 or cleaned_files > 0:
             log_info(
-                f"Cleaned up {len(orphaned_dirs)} orphaned directories and {len(orphaned_files)} orphaned files"
+                f"Cleaned up {cleaned_dirs} orphaned directories and {cleaned_files} orphaned files"
             )
+            if len(orphaned_dirs) > cleaned_dirs or len(orphaned_files) > cleaned_files:
+                remaining_dirs = len(orphaned_dirs) - cleaned_dirs
+                remaining_files = len(orphaned_files) - cleaned_files
+                log_warning(
+                    f"Some orphaned items remain: {remaining_dirs} directories, {remaining_files} files"
+                )
 
 
 # Global cleanup manager instance
-_cleanup_manager = None
-_manager_lock = threading.Lock()
+_cleanup_manager = CleanupManager()
 
 
 def get_cleanup_manager() -> CleanupManager:
     """Get the global cleanup manager instance."""
-    global _cleanup_manager
-
-    if _cleanup_manager is None:
-        with _manager_lock:
-            if _cleanup_manager is None:
-                _cleanup_manager = CleanupManager()
-                _cleanup_manager.register_signal_handlers()
-                # Clean up any orphaned temps from previous runs
-                _cleanup_manager.cleanup_orphaned_temps()
-
     return _cleanup_manager
+
+
+def initialize_cleanup():
+    """Initialize the cleanup system with signal handlers."""
+    _cleanup_manager.register_signal_handlers()
+    _cleanup_manager.cleanup_orphaned_temps()
 
 
 def create_managed_temp_dir(prefix: str = "coldstore_") -> Path:
     """Create a temporary directory that will be automatically cleaned up."""
-    manager = get_cleanup_manager()
     temp_dir = Path(tempfile.mkdtemp(prefix=prefix))
-    return manager.add_temp_directory(temp_dir)
+    _cleanup_manager.add_temp_directory(temp_dir)
+    return temp_dir
 
 
 def create_managed_temp_file(prefix: str = "coldstore_", suffix: str = "") -> Path:
     """Create a temporary file that will be automatically cleaned up."""
-    manager = get_cleanup_manager()
-    with tempfile.NamedTemporaryFile(prefix=prefix, suffix=suffix, delete=False) as tmp:
-        temp_file = Path(tmp.name)
-    return manager.add_temp_file(temp_file)
+    fd, temp_path = tempfile.mkstemp(prefix=prefix, suffix=suffix)
+    import os
+
+    os.close(fd)  # Close the file descriptor, we just want the path
+    temp_file = Path(temp_path)
+    _cleanup_manager.add_temp_file(temp_file)
+    return temp_file
 
 
 def register_cleanup_callback(callback: Callable[[], None]):
     """Register a custom cleanup callback."""
-    manager = get_cleanup_manager()
-    manager.add_cleanup_callback(callback)
+    _cleanup_manager.add_cleanup_callback(callback)
 
 
 def manual_cleanup():
-    """Manually trigger cleanup (useful for testing)."""
-    manager = get_cleanup_manager()
-    manager.cleanup_all()
+    """Manually trigger cleanup of all resources."""
+    _cleanup_manager.cleanup_all()
