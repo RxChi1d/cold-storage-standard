@@ -1,94 +1,119 @@
-"""Archive handling and 7z structure detection."""
+"""Archive handling with unified multi-format support."""
 
 import tempfile
 from pathlib import Path
 
-import py7zr
-
+from coldstore.core.format_detector import ArchiveFormat, create_format_detector
+from coldstore.core.handlers import ArchiveEntry, BaseArchiveHandler, create_handler
 from coldstore.logging import log_detail, log_error, log_info, log_step, log_warning
 
 
 class ArchiveAnalyzer:
-    """Intelligent 7z structure detection and handling."""
+    """Unified archive analyzer supporting multiple formats."""
 
     def __init__(self):
-        # py7zr supports these formats natively
-        self.supported_formats = [".7z", ".zip", ".tar", ".gz", ".bz2", ".xz"]
-        # Note: .rar support is limited in py7zr, may need additional handling
+        self.format_detector = create_format_detector()
+        self.handler: BaseArchiveHandler | None = None
         self.temp_dir: Path | None = None
+        self.detected_format: ArchiveFormat | None = None
 
     def is_supported_archive(self, file_path: Path) -> bool:
         """Check if file is a supported archive format."""
-        return any(
-            str(file_path).lower().endswith(ext) for ext in self.supported_formats
-        )
+        return self.format_detector.is_supported(file_path)
 
-    def analyze_archive_structure(self, archive_path: Path) -> dict:
-        """Analyze archive structure to detect nested folders using py7zr."""
+    def analyze_archive_structure(self, archive_path: Path) -> dict[str, any]:
+        """Analyze archive structure using appropriate handler."""
         try:
             log_step(f"Analyzing archive structure: {archive_path.name}")
 
-            # Use py7zr to list archive contents
-            with py7zr.SevenZipFile(archive_path, mode="r") as archive:
-                entries = self._extract_file_info_from_py7zr(archive)
+            # Detect format
+            self.detected_format = self.format_detector.detect_format(archive_path)
+            if self.detected_format == ArchiveFormat.UNKNOWN:
+                log_error(f"Unsupported archive format: {archive_path}")
+                return self._create_error_structure("Unsupported format")
 
+            # Special validation for RAR format
+            if (
+                self.detected_format == ArchiveFormat.RAR
+                and not self._validate_rar_processing()
+            ):
+                return self._create_error_structure("RAR processing not available")
+
+            # Create appropriate handler
+            self.handler = create_handler(archive_path, self.detected_format.value)
+            if not self.handler:
+                log_error(
+                    f"No handler available for format: {self.detected_format.value}"
+                )
+                return self._create_error_structure("No handler available")
+
+            # List archive contents
+            entries = self.handler.list_contents()
+            if not entries:
+                log_warning("Archive appears to be empty")
+                return self._create_empty_structure()
+
+            # Analyze structure
             structure_info = self._analyze_structure(entries)
-
             log_info(f"Archive analysis complete: {len(entries)} entries")
+            log_detail(f"Format: {self.detected_format.value}")
             log_detail(f"Structure: {structure_info['description']}")
 
             return structure_info
 
         except Exception as e:
             log_error(f"Failed to analyze archive: {e}")
-            return {
-                "type": "unknown",
-                "description": "Failed to analyze",
-                "has_single_root": False,
-                "root_folder": None,
-                "entries": [],
-            }
+            return self._create_error_structure(f"Analysis failed: {e}")
 
-    def _extract_file_info_from_py7zr(self, archive: py7zr.SevenZipFile) -> list[dict]:
-        """Extract file information from py7zr archive object."""
-        entries = []
+    def _validate_rar_processing(self) -> bool:
+        """Validate RAR processing requirements before proceeding."""
+        from coldstore.core.system_tools import validate_rar_requirements
 
-        try:
-            # Get list of files in archive
-            file_list = archive.list()
+        return validate_rar_requirements()
 
-            for file_info in file_list:
-                # py7zr FileInfo object contains filename, is_directory, etc.
-                entry = {
-                    "path": file_info.filename,
-                    "size": file_info.uncompressed
-                    if hasattr(file_info, "uncompressed")
-                    else 0,
-                    "is_dir": file_info.is_directory,
-                    "attributes": "D" if file_info.is_directory else "A",
-                }
-                entries.append(entry)
+    def _create_error_structure(self, error_msg: str) -> dict[str, any]:
+        """Create error structure info."""
+        return {
+            "type": "error",
+            "description": error_msg,
+            "has_single_root": False,
+            "root_folder": None,
+            "entries": [],
+            "format": self.detected_format.value if self.detected_format else "unknown",
+        }
 
-        except Exception as e:
-            log_warning(f"Error reading archive contents: {e}")
+    def _create_empty_structure(self) -> dict[str, any]:
+        """Create empty structure info."""
+        return {
+            "type": "empty",
+            "description": "Empty archive",
+            "has_single_root": False,
+            "root_folder": None,
+            "entries": [],
+            "format": self.detected_format.value if self.detected_format else "unknown",
+        }
 
-        return entries
-
-    def _analyze_structure(self, entries: list[dict]) -> dict:
+    def _analyze_structure(self, entries: list[ArchiveEntry]) -> dict[str, any]:
         """Analyze archive structure to determine organization."""
         if not entries:
-            return {
-                "type": "empty",
-                "description": "Empty archive",
-                "has_single_root": False,
-                "root_folder": None,
-                "entries": [],
+            return self._create_empty_structure()
+
+        # Convert ArchiveEntry objects to compatible format
+        entry_dicts = []
+        for entry in entries:
+            entry_dict = {
+                "path": entry.path,
+                "size": entry.size,
+                "is_dir": entry.is_dir,
+                "compressed_size": entry.compressed_size,
             }
+            entry_dicts.append(entry_dict)
 
         # Get all top-level entries
         top_level_entries = []
-        for entry in entries:
+        for entry in entry_dicts:
             path_parts = entry["path"].split("/")
+            # Handle different path separators and formats
             if len(path_parts) == 1 or (len(path_parts) == 2 and path_parts[1] == ""):
                 top_level_entries.append(entry)
 
@@ -99,7 +124,10 @@ class ArchiveAnalyzer:
                 "description": f"Single root folder: {top_level_entries[0]['path']}",
                 "has_single_root": True,
                 "root_folder": top_level_entries[0]["path"],
-                "entries": entries,
+                "entries": entry_dicts,
+                "format": self.detected_format.value
+                if self.detected_format
+                else "unknown",
             }
 
         # Check for multiple top-level entries
@@ -111,33 +139,73 @@ class ArchiveAnalyzer:
                 "description": f"Multiple top-level entries: {dirs} dirs, {files} files",
                 "has_single_root": False,
                 "root_folder": None,
-                "entries": entries,
+                "entries": entry_dicts,
+                "format": self.detected_format.value
+                if self.detected_format
+                else "unknown",
             }
 
         # Single file at root
+        if top_level_entries:
+            return {
+                "type": "single_file",
+                "description": f"Single file: {top_level_entries[0]['path']}",
+                "has_single_root": False,
+                "root_folder": None,
+                "entries": entry_dicts,
+                "format": self.detected_format.value
+                if self.detected_format
+                else "unknown",
+            }
+
+        # Fallback case
         return {
-            "type": "single_file",
-            "description": f"Single file: {top_level_entries[0]['path']}",
+            "type": "unknown",
+            "description": "Unknown structure",
             "has_single_root": False,
             "root_folder": None,
-            "entries": entries,
+            "entries": entry_dicts,
+            "format": self.detected_format.value if self.detected_format else "unknown",
         }
 
     def extract_archive(self, archive_path: Path, extract_to: Path) -> bool:
-        """Extract archive to specified directory using py7zr."""
+        """Extract archive using appropriate handler."""
         try:
             log_step(f"Extracting archive: {archive_path.name}")
 
-            # Create extraction directory
-            extract_to.mkdir(parents=True, exist_ok=True)
+            # Detect format if not already done
+            if not self.handler:
+                detected_format = self.format_detector.detect_format(archive_path)
+                if detected_format == ArchiveFormat.UNKNOWN:
+                    log_error(f"Unsupported archive format: {archive_path}")
+                    return False
 
-            # Extract using py7zr
-            with py7zr.SevenZipFile(archive_path, mode="r") as archive:
-                archive.extractall(path=extract_to)
+                # Special validation for RAR format
+                if (
+                    detected_format == ArchiveFormat.RAR
+                    and not self._validate_rar_processing()
+                ):
+                    return False
 
-            log_info(f"Archive extracted to: {extract_to}")
-            log_detail("✅ Cross-platform extraction using py7zr")
-            return True
+                self.handler = create_handler(archive_path, detected_format.value)
+                if not self.handler:
+                    log_error(
+                        f"No handler available for format: {detected_format.value}"
+                    )
+                    return False
+
+            # Extract using the handler
+            success = self.handler.extract_all(extract_to)
+            if success:
+                log_info(f"Archive extracted successfully to: {extract_to}")
+                log_detail(f"Format: {self.handler.format_name}")
+                log_detail("✅ Multi-format extraction successful")
+            else:
+                # For RAR format, the handler already provides detailed error messages
+                if self.handler.format_name != "rar":
+                    log_error("Archive extraction failed")
+
+            return success
 
         except Exception as e:
             log_error(f"Failed to extract archive: {e}")
@@ -145,23 +213,29 @@ class ArchiveAnalyzer:
             return False
 
     def handle_nested_structure(
-        self, extracted_path: Path, structure_info: dict
+        self, extracted_path: Path, structure_info: dict[str, any]
     ) -> Path:
         """Handle nested folder structures by flattening if needed."""
         if not structure_info["has_single_root"]:
             return extracted_path
 
         root_folder = structure_info["root_folder"]
+        if not root_folder:
+            return extracted_path
+
         root_path = extracted_path / root_folder
 
         if root_path.exists() and root_path.is_dir():
             log_info(f"Detected single root folder: {root_folder}")
 
             # Check if we should flatten (avoid double nesting)
-            contents = list(root_path.iterdir())
-            if len(contents) > 1 or (len(contents) == 1 and contents[0].is_file()):
-                log_info("Flattening single root folder structure")
-                return root_path
+            try:
+                contents = list(root_path.iterdir())
+                if len(contents) > 1 or (len(contents) == 1 and contents[0].is_file()):
+                    log_info("Flattening single root folder structure")
+                    return root_path
+            except Exception as e:
+                log_warning(f"Error checking root folder contents: {e}")
 
         return extracted_path
 
@@ -180,34 +254,37 @@ class ArchiveAnalyzer:
             self.temp_dir = None
             log_info("Temporary extraction directory cleaned up")
 
-    def get_archive_info(self, archive_path: Path) -> dict:
-        """Get comprehensive archive information using py7zr."""
+    def get_archive_info(self, archive_path: Path) -> dict[str, any]:
+        """Get comprehensive archive information using appropriate handler."""
         try:
-            with py7zr.SevenZipFile(archive_path, mode="r") as archive:
-                file_list = archive.list()
+            # Detect format if not already done
+            if not self.handler:
+                detected_format = self.format_detector.detect_format(archive_path)
+                if detected_format == ArchiveFormat.UNKNOWN:
+                    log_warning(f"Unsupported archive format: {archive_path}")
+                    return {
+                        "files": 0,
+                        "folders": 0,
+                        "total_size": 0,
+                        "compressed_size": archive_path.stat().st_size,
+                        "format": "unknown",
+                    }
 
-                files_count = 0
-                folders_count = 0
-                total_size = 0
+                self.handler = create_handler(archive_path, detected_format.value)
+                if not self.handler:
+                    log_warning(
+                        f"No handler available for format: {detected_format.value}"
+                    )
+                    return {
+                        "files": 0,
+                        "folders": 0,
+                        "total_size": 0,
+                        "compressed_size": archive_path.stat().st_size,
+                        "format": detected_format.value,
+                    }
 
-                for file_info in file_list:
-                    if file_info.is_directory:
-                        folders_count += 1
-                    else:
-                        files_count += 1
-                        # Add file size if available
-                        if (
-                            hasattr(file_info, "uncompressed")
-                            and file_info.uncompressed
-                        ):
-                            total_size += file_info.uncompressed
-
-            return {
-                "files": files_count,
-                "folders": folders_count,
-                "total_size": total_size,
-                "format": archive_path.suffix.lower(),
-            }
+            # Get info using the handler
+            return self.handler.get_archive_info()
 
         except Exception as e:
             log_warning(f"Failed to get archive info: {e}")
@@ -215,8 +292,17 @@ class ArchiveAnalyzer:
                 "files": 0,
                 "folders": 0,
                 "total_size": 0,
-                "format": archive_path.suffix.lower(),
+                "compressed_size": archive_path.stat().st_size,
+                "format": "unknown",
             }
+
+    def get_format_info(self, archive_path: Path) -> dict[str, any]:
+        """Get format detection information."""
+        return self.format_detector.get_format_info(archive_path)
+
+    def list_supported_formats(self) -> list[str]:
+        """List all supported archive formats."""
+        return [fmt.value for fmt in ArchiveFormat if fmt != ArchiveFormat.UNKNOWN]
 
 
 def create_analyzer() -> ArchiveAnalyzer:

@@ -66,7 +66,7 @@ def main(
     compressor = create_compressor()
     archive_info = compressor.get_archive_info(archive_path)
 
-    log_info(f"Archive size: {archive_info['compressed_size'] / (1024*1024):.1f} MB")
+    log_info(f"Archive size: {archive_info['compressed_size'] / (1024 * 1024):.1f} MB")
     log_info(f"Memory required: ~{archive_info['memory_required_mb']} MB")
     log_info(f"Window log: {archive_info['window_log']}")
 
@@ -126,7 +126,7 @@ def main(
             [
                 f"Archive: {archive_path.name}",
                 f"Extracted {file_count} files and {dir_count} directories",
-                f"Total size: {extracted_size / (1024*1024):.1f} MB",
+                f"Total size: {extracted_size / (1024 * 1024):.1f} MB",
                 f"Output location: {extract_dir}",
                 f"Memory used: ~{archive_info['memory_required_mb']} MB",
             ],

@@ -257,7 +257,7 @@ def main(
             f"Total archives: {total_archives}",
             f"Passed: {passed_archives}",
             f"Failed: {failed_archives}",
-            f"Success rate: {(passed_archives/total_archives)*100:.1f}%"
+            f"Success rate: {(passed_archives / total_archives) * 100:.1f}%"
             if total_archives > 0
             else "N/A",
         ],

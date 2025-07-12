@@ -50,7 +50,7 @@ class CompressionEngine:
                         )  # 10% overhead
                         estimates.append(("directory_sampling", estimated_size))
                         log_detail(
-                            f"Directory sampling estimate: {estimated_size / (1024*1024):.1f}MB"
+                            f"Directory sampling estimate: {estimated_size / (1024 * 1024):.1f}MB"
                         )
             except Exception as e:
                 log_detail(f"Directory sampling failed: {e}")
@@ -63,7 +63,7 @@ class CompressionEngine:
             estimated_original = int(archive_size * 3.5)  # Conservative multiplier
             estimates.append(("archive_reference", estimated_original))
             log_detail(
-                f"Archive reference estimate: {estimated_original / (1024*1024):.1f}MB"
+                f"Archive reference estimate: {estimated_original / (1024 * 1024):.1f}MB"
             )
 
         # Use the larger estimate for conservative memory allocation
@@ -191,7 +191,7 @@ class CompressionEngine:
                 return False
 
             tar_size = tar_path.stat().st_size
-            log_info(f"Tar archive created: {tar_size / (1024*1024):.1f} MB")
+            log_info(f"Tar archive created: {tar_size / (1024 * 1024):.1f} MB")
             log_detail("✅ Cross-platform deterministic tar creation successful")
 
             return True
@@ -240,7 +240,7 @@ class CompressionEngine:
 
                 log_detail(f"Long-distance matching enabled (window_log={window_log})")
                 log_detail(
-                    f"File size: {file_size / (1024*1024):.1f}MB, Window size: {2**window_log / (1024*1024):.0f}MB"
+                    f"File size: {file_size / (1024 * 1024):.1f}MB, Window size: {2**window_log / (1024 * 1024):.0f}MB"
                 )
 
                 cparams = zstd.ZstdCompressionParameters(
@@ -258,9 +258,10 @@ class CompressionEngine:
                 compressor = zstd.ZstdCompressor(compression_params=cparams)
 
             # Compress file
-            with open(tar_path, "rb") as input_file, open(
-                zst_path, "wb"
-            ) as output_file:
+            with (
+                open(tar_path, "rb") as input_file,
+                open(zst_path, "wb") as output_file,
+            ):
                 compressor.copy_stream(input_file, output_file)
 
             # Verify output file was created
@@ -273,8 +274,8 @@ class CompressionEngine:
             ratio = (1 - compressed_size / original_size) * 100
 
             log_info(
-                f"Compression complete: {original_size / (1024*1024):.1f} MB → "
-                f"{compressed_size / (1024*1024):.1f} MB ({ratio:.1f}% reduction)"
+                f"Compression complete: {original_size / (1024 * 1024):.1f} MB → "
+                f"{compressed_size / (1024 * 1024):.1f} MB ({ratio:.1f}% reduction)"
             )
 
             return True
@@ -300,7 +301,7 @@ class CompressionEngine:
 
                     window_log = int(math.log2(frame_params.window_size))
                     log_detail(
-                        f"Detected window_log={window_log} (~{frame_params.window_size // (1024*1024)}MB window)"
+                        f"Detected window_log={window_log} (~{frame_params.window_size // (1024 * 1024)}MB window)"
                     )
                     return window_log
                 else:
@@ -435,9 +436,10 @@ class CompressionEngine:
             decompressor = zstd.ZstdDecompressor()
 
             # Decompress file
-            with open(zst_path, "rb") as input_file, open(
-                tar_path, "wb"
-            ) as output_file:
+            with (
+                open(zst_path, "rb") as input_file,
+                open(tar_path, "wb") as output_file,
+            ):
                 decompressor.copy_stream(input_file, output_file)
 
             # Verify output file was created
@@ -449,7 +451,7 @@ class CompressionEngine:
             decompressed_size = tar_path.stat().st_size
 
             log_info(
-                f"Decompression complete: {original_size / (1024*1024):.1f} MB → {decompressed_size / (1024*1024):.1f} MB"
+                f"Decompression complete: {original_size / (1024 * 1024):.1f} MB → {decompressed_size / (1024 * 1024):.1f} MB"
             )
 
             return True

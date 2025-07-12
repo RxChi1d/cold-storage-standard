@@ -52,7 +52,7 @@ class SystemChecker:
             return False
 
         log_info(
-            f"Memory check: {available_mb:.0f}MB/{total_gb*1024:.0f}MB available, need {required_mb:.0f}MB"
+            f"Memory check: {available_mb:.0f}MB/{total_gb * 1024:.0f}MB available, need {required_mb:.0f}MB"
         )
         return True
 

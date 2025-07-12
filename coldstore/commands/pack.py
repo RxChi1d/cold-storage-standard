@@ -75,8 +75,15 @@ def main(
 ):
     """Convert archives to cold storage format.
 
-    This command processes 7z/zip/rar files and converts them to verified
+    This command processes multiple archive formats and converts them to verified
     tar.zst archives with SHA-256, BLAKE3, and PAR2 protection.
+
+    Supported formats:
+    - 7z archives (.7z)
+    - ZIP archives (.zip)
+    - RAR archives (.rar)
+    - TAR archives (.tar, .tar.gz, .tar.bz2, .tar.xz)
+    - Standalone compressed files (.gz, .bz2, .xz)
 
     Equivalent to archive-compress.sh functionality.
     """
@@ -111,19 +118,45 @@ def main(
     analyzer = create_analyzer()
     work_path = input_path
 
-    if input_path.is_file() and analyzer.is_supported_archive(input_path):
-        log_info("Detected archive file, analyzing structure...")
-        structure_info = analyzer.analyze_archive_structure(input_path)
+    if input_path.is_file():
+        # Check if it's a supported archive format
+        if analyzer.is_supported_archive(input_path):
+            format_info = analyzer.get_format_info(input_path)
+            log_info(
+                f"Detected {format_info['format']} archive file, analyzing structure..."
+            )
 
-        # Extract to temporary directory
-        temp_extract_path = analyzer.prepare_extraction_temp()
-        if not analyzer.extract_archive(input_path, temp_extract_path):
-            log_error("Failed to extract archive")
-            analyzer.cleanup_temp()
-            raise typer.Exit(1)
+            structure_info = analyzer.analyze_archive_structure(input_path)
 
-        # Handle nested structures
-        work_path = analyzer.handle_nested_structure(temp_extract_path, structure_info)
+            # Check for analysis errors
+            if structure_info.get("type") == "error":
+                log_error(f"Archive analysis failed: {structure_info['description']}")
+                raise typer.Exit(1)
+
+            # Extract to temporary directory
+            temp_extract_path = analyzer.prepare_extraction_temp()
+            if not analyzer.extract_archive(input_path, temp_extract_path):
+                log_error("Failed to extract archive")
+                analyzer.cleanup_temp()
+                raise typer.Exit(1)
+
+            # Handle nested structures
+            work_path = analyzer.handle_nested_structure(
+                temp_extract_path, structure_info
+            )
+        else:
+            # Check if it's a file we can't handle
+            format_info = analyzer.get_format_info(input_path)
+            if not format_info["supported"]:
+                log_error(f"Unsupported archive format: {format_info['format']}")
+                log_info(
+                    "Supported formats: " + ", ".join(analyzer.list_supported_formats())
+                )
+                raise typer.Exit(1)
+
+            # If it's not an archive, treat as a single file
+            log_info("Processing single file (not an archive)")
+            work_path = input_path
 
     try:
         # Step 4: Compression with progress tracking
@@ -179,8 +212,8 @@ def main(
         show_summary(
             "Cold Storage Conversion Complete",
             [
-                f"Original size: {original_size / (1024*1024):.1f} MB",
-                f"Compressed size: {compressed_size / (1024*1024):.1f} MB",
+                f"Original size: {original_size / (1024 * 1024):.1f} MB",
+                f"Compressed size: {compressed_size / (1024 * 1024):.1f} MB",
                 f"Compression ratio: {ratio:.1f}%",
                 f"Output location: {archive_path.parent}",
                 f"Archive: {archive_path.name}",

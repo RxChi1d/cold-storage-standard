@@ -1,6 +1,5 @@
 """Rich logging system for Cold Storage Standard - replacing bash color logs."""
 
-
 from loguru import logger
 from rich.console import Console
 from rich.logging import RichHandler

@@ -65,6 +65,23 @@ Four bash scripts for backward compatibility:
 - **Intelligent organization**: Creates subdirectories to avoid file conflicts
 - **Memory optimization**: Uses `--long=31` (2GB dictionary) for better compression
 
+## Supported Archive Formats
+
+The coldstore application supports comprehensive format detection and processing:
+
+### Archive Formats (10+ formats supported)
+- **7z archives** (.7z) - Using py7zr library
+- **ZIP archives** (.zip) - Using built-in zipfile
+- **RAR archives** (.rar) - Using rarfile + system unrar tool
+- **TAR archives** (.tar, .tar.gz, .tar.bz2, .tar.xz) - Using built-in tarfile
+- **Standalone compressed files** (.gz, .bz2, .xz) - Using respective built-in modules
+
+### Format Detection
+- **Automatic detection** using file extensions and magic bytes
+- **Fallback handling** for files with incorrect extensions
+- **Smart processing** with format-specific optimizations
+- **Early validation** of system requirements (e.g., unrar tool for RAR files)
+
 ## Common Commands
 
 ### Primary Tool (coldstore)
@@ -76,19 +93,30 @@ pip install -r requirements.txt
 
 # Install system dependencies for hash/recovery operations
 # Ubuntu/Debian
-sudo apt update && apt install python3 par2cmdline b3sum
+sudo apt update && apt install python3 par2cmdline b3sum unrar
 
 # macOS (Homebrew)
-brew install python3 par2 b3sum
+brew install python3 par2 b3sum unrar
 
 # CentOS/RHEL/Rocky Linux
-sudo yum install python3 par2cmdline b3sum
+sudo yum install python3 par2cmdline b3sum unrar
 ```
 
 **Basic Usage:**
 ```bash
 # Convert archives to cold storage format
 coldstore pack input_directory
+
+# Process various archive formats (automatic format detection)
+coldstore pack archive.7z     # 7z archives
+coldstore pack archive.zip    # ZIP archives
+coldstore pack archive.rar    # RAR archives (requires unrar tool)
+coldstore pack archive.tar.gz # TAR with gzip compression
+coldstore pack archive.tar.bz2 # TAR with bzip2 compression
+coldstore pack archive.tar.xz  # TAR with xz compression
+coldstore pack archive.gz     # Standalone gzip files
+coldstore pack archive.bz2    # Standalone bzip2 files
+coldstore pack archive.xz     # Standalone xz files
 
 # Verify archive integrity (5-layer verification)
 coldstore verify archive.tar.zst
@@ -186,14 +214,20 @@ coldstore process --verify-only archive.tar.zst
 **Python Dependencies:**
 - `python3` (3.8+) - Python runtime
 - `py7zr` - Archive extraction (.7z, .zip, .tar, etc.)
+- `rarfile` - RAR archive support (requires system unrar tool)
 - `python-zstandard` - Intelligent compression/decompression
 - `tarfile` (built-in) - TAR archive operations
+- `zipfile` (built-in) - ZIP archive operations
+- `gzip` (built-in) - Gzip compression support
+- `bz2` (built-in) - Bzip2 compression support
+- `lzma` (built-in) - XZ compression support
 - `rich` - Beautiful terminal UI
 - `typer` - CLI framework
 
-**System Dependencies (minimal):**
+**System Dependencies:**
 - `par2cmdline` - PAR2 recovery files
 - `b3sum` - BLAKE3 hashing
+- `unrar` - RAR archive extraction (for RAR format support)
 
 **Key Advantages:**
 - **No external archive tools required** (7z, zstd, tar handled by Python)
@@ -257,6 +291,9 @@ Each processed archive creates:
 
 ### Python Application Architecture
 - **Modular design**: Separate core modules for compression, hashing, system checks
+- **Format detection**: Intelligent format detection using file extensions and magic bytes
+- **Unified handlers**: Pluggable archive handler system supporting 10+ formats
+- **System validation**: Proactive checking for required system tools (unrar, etc.)
 - **Rich logging**: Color-coded output with progress bars and tables
 - **Intelligent automation**: Auto-detects compression parameters and memory requirements
 - **Cross-platform**: Pure Python implementation with platform-specific optimizations
@@ -285,6 +322,16 @@ Each processed archive creates:
 2. **Missing dependencies**: Run `pip install -r requirements.txt`
 3. **Permission errors**: Check file/directory permissions
 4. **Archive corruption**: Use future PAR2 repair functionality
+5. **RAR processing failures**:
+   - **Tool not found**: Install unrar tool with platform-specific command:
+     - macOS: `brew install unrar`
+     - Ubuntu/Debian: `sudo apt install unrar`
+     - CentOS/RHEL: `sudo yum install unrar` or `sudo dnf install unrar`
+     - Arch Linux: `sudo pacman -S unrar`
+   - System automatically detects multiple unrar variants: `unrar`, `rar`, `unrar-nonfree`, `unrar-free`
+   - Error messages provide specific installation instructions for your platform
+   - Alternative: Extract RAR manually, then process the extracted folder
+   - Alternative: Convert RAR to ZIP format using another tool
 
 ### Verification Workflow
 **Always verify integrity before extraction:**
@@ -303,8 +350,15 @@ coldstore -v verify archive.tar.zst
 3. **Cross-platform compatibility**: Handled by pure Python implementation
 4. **Progress tracking**: Real-time progress bars and detailed statistics
 
+### Error Handling Improvements
+- **Early validation**: System requirements checked before processing begins
+- **Clear diagnostics**: Detailed error messages with specific resolution steps
+- **Graceful failures**: Failed operations don't leave partial or corrupted files
+- **Platform-specific guidance**: Installation instructions tailored to your OS
+
 If verification fails:
 1. Check file corruption (PAR2 repair coming in M3)
 2. Verify compression parameters auto-detection
 3. Ensure sufficient disk space
 4. Check Python library versions
+5. For RAR files: ensure unrar tool is installed and accessible
