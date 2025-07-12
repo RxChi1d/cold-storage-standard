@@ -10,6 +10,8 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
 NC='\033[0m' # No Color
 
 # Helper functions
@@ -31,6 +33,20 @@ log_error() {
 
 log_detail() {
     echo -e "${NC}[DETAIL]${NC} $1"
+}
+
+log_progress() {
+    echo -e "${MAGENTA}[PROGRESS]${NC} $1"
+}
+
+# Function to generate separator line based on content length
+generate_separator() {
+    local content="$1"
+    local min_length=50
+    local content_length=${#content}
+    local separator_length=$((content_length > min_length ? content_length + 10 : min_length))
+
+    printf '=%.0s' $(seq 1 $separator_length)
 }
 
 # Show usage instructions
@@ -117,40 +133,77 @@ if [ $seven_zip_count -eq 0 ]; then
 fi
 
 log_info "Found $seven_zip_count 7z files"
+start_separator=$(generate_separator "Starting batch processing...")
+echo "$start_separator"
+log_progress "Starting batch processing..."
+echo "$start_separator"
 
 # Process each 7z file
 success_count=0
 error_count=0
+current_file=0
 
 while IFS= read -r file; do
+    current_file=$((current_file + 1))
+
     # Remove ./ prefix
     clean_filename="${file#./}"
 
-    log_info "Processing: $clean_filename -> $OUTPUT_DIR"
+    # Calculate and show percentage
+    percentage=$(( (current_file * 100) / seven_zip_count ))
+    remaining=$((seven_zip_count - current_file))
+
+    # Prepare progress content
+    progress_content="[$current_file/$seven_zip_count] ($percentage%) Processing: $clean_filename"
+    output_content="Output: $OUTPUT_DIR"
+
+    # Generate dynamic separator based on longest content
+    max_content="$progress_content"
+    if [ ${#output_content} -gt ${#max_content} ]; then
+        max_content="$output_content"
+    fi
+
+    separator=$(generate_separator "$max_content")
+
+    # Display progress with dynamic separators
+    echo
+    echo "$separator"
+    log_progress "$progress_content"
+    log_info "$output_content"
+    if [ $remaining -gt 0 ]; then
+        log_progress "Remaining: $remaining files"
+    fi
+    echo "$separator"
 
     if coldstore pack -o "$OUTPUT_DIR" "$clean_filename"; then
-        log_success "Successfully processed: $clean_filename"
+        log_success "✓ Successfully processed: $clean_filename"
         success_count=$((success_count + 1))
     else
-        log_error "Failed to process: $clean_filename"
+        log_error "✗ Failed to process: $clean_filename"
         error_count=$((error_count + 1))
     fi
 
-    echo  # Empty line separator
 done < "$temp_file"
 
 # Display result summary
-echo "======== Processing Summary ========"
+echo
+summary_separator=$(generate_separator "Processing Summary")
+echo "$summary_separator"
+echo "         Processing Summary"
+echo "$summary_separator"
 log_info "Total files: $seven_zip_count"
 log_success "Successful: $success_count"
 if [ $error_count -gt 0 ]; then
     log_error "Failed: $error_count"
 fi
 
+# Final progress indication
 if [ $error_count -eq 0 ]; then
-    log_success "All files processed successfully!"
+    echo -e "${GREEN}✓ All files processed successfully! (100%)${NC}"
     exit 0
 else
+    success_rate=$(( (success_count * 100) / seven_zip_count ))
+    echo -e "${YELLOW}⚠ Some files failed to process (Success rate: ${success_rate}%)${NC}"
     log_warning "Some files failed to process, please check error messages"
     exit 1
 fi

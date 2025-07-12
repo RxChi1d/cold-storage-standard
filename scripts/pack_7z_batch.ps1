@@ -63,6 +63,22 @@ function Write-LogDetail {
     Write-Host "[DETAIL] $Message" -ForegroundColor Gray
 }
 
+function Write-LogProgress {
+    param([string]$Message)
+    Write-Host "[PROGRESS] $Message" -ForegroundColor Magenta
+}
+
+# Function to generate separator line based on content length
+function Get-Separator {
+    param([string]$Content)
+
+    $minLength = 50
+    $contentLength = $Content.Length
+    $separatorLength = if ($contentLength -gt $minLength) { $contentLength + 10 } else { $minLength }
+
+    return "=" * $separatorLength
+}
+
 function Show-Usage {
     Write-Host ""
     Write-Host "Usage: .\pack_7z_batch.ps1 <input_directory> [output_directory]" -ForegroundColor Cyan
@@ -133,59 +149,104 @@ try {
         }
 
         Write-LogInfo "Found $($sevenZipFiles.Count) 7z files"
+        $startSeparator = Get-Separator "Starting batch processing..."
+        Write-Host $startSeparator
+        Write-LogProgress "Starting batch processing..."
+        Write-Host $startSeparator
 
         # Process each 7z file
         $successCount = 0
         $errorCount = 0
+        $currentFile = 0
 
         foreach ($file in $sevenZipFiles) {
-            Write-LogInfo "Processing: $($file.Name) -> $OutputPath"
+            $currentFile++
+
+            # Calculate percentage and remaining files
+            $percentage = [math]::Round(($currentFile / $sevenZipFiles.Count) * 100, 1)
+            $remaining = $sevenZipFiles.Count - $currentFile
+
+            # Update PowerShell progress bar
+            Write-Progress -Activity "Processing 7z files" -Status "Processing $($file.Name)" -PercentComplete $percentage -CurrentOperation "File $currentFile of $($sevenZipFiles.Count)"
+
+            # Prepare progress content
+            $progressContent = "[$currentFile/$($sevenZipFiles.Count)] ($percentage%) Processing: $($file.Name)"
+            $outputContent = "Output: $OutputPath"
+
+            # Generate dynamic separator based on longest content
+            $maxContent = $progressContent
+            if ($outputContent.Length -gt $maxContent.Length) {
+                $maxContent = $outputContent
+            }
+
+            $separator = Get-Separator $maxContent
+
+            # Display progress with dynamic separators
+            Write-Host ""
+            Write-Host $separator
+            Write-LogProgress $progressContent
+            Write-LogInfo $outputContent
+            if ($remaining -gt 0) {
+                Write-LogProgress "Remaining: $remaining files"
+            }
+            Write-Host $separator
 
             try {
                 # Execute coldstore pack command
                 $process = Start-Process -FilePath "coldstore" -ArgumentList "pack", "-o", $OutputPath, $file.Name -Wait -PassThru -NoNewWindow
 
                 if ($process.ExitCode -eq 0) {
-                    Write-LogSuccess "Successfully processed: $($file.Name)"
+                    Write-LogSuccess "✓ Successfully processed: $($file.Name)"
                     $successCount++
                 }
                 else {
-                    Write-LogError "Failed to process: $($file.Name) (exit code: $($process.ExitCode))"
+                    Write-LogError "✗ Failed to process: $($file.Name) (exit code: $($process.ExitCode))"
                     $errorCount++
                 }
             }
             catch {
-                Write-LogError "Failed to process: $($file.Name)"
+                Write-LogError "✗ Failed to process: $($file.Name)"
                 Write-LogError $_.Exception.Message
                 $errorCount++
             }
-
-            Write-Host ""  # Empty line separator
         }
 
+        # Complete the progress bar
+        Write-Progress -Activity "Processing 7z files" -Completed
+
         # Display result summary
-        Write-Host "======== Processing Summary ========" -ForegroundColor Cyan
+        Write-Host ""
+        $summarySeparator = Get-Separator "Processing Summary"
+        Write-Host $summarySeparator
+        Write-Host "         Processing Summary"
+        Write-Host $summarySeparator
         Write-LogInfo "Total files: $($sevenZipFiles.Count)"
         Write-LogSuccess "Successful: $successCount"
         if ($errorCount -gt 0) {
             Write-LogError "Failed: $errorCount"
         }
 
+        # Final progress indication
         if ($errorCount -eq 0) {
-            Write-LogSuccess "All files processed successfully!"
+            Write-Host "✓ All files processed successfully! (100%)" -ForegroundColor Green
             exit 0
         }
         else {
+            $successRate = [math]::Round(($successCount / $sevenZipFiles.Count) * 100, 1)
+            Write-Host "⚠ Some files failed to process (Success rate: $successRate%)" -ForegroundColor Yellow
             Write-LogWarning "Some files failed to process, please check error messages"
             exit 1
         }
     }
     finally {
+        # Complete any remaining progress display
+        Write-Progress -Activity "Processing 7z files" -Completed
         # Restore original directory
         Pop-Location
     }
 }
 catch {
+    Write-Progress -Activity "Processing 7z files" -Completed
     Write-LogError "Script execution failed: $($_.Exception.Message)"
     exit 1
 }
