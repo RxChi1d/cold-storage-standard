@@ -241,32 +241,18 @@ class CleanupManager:
         # Call internal cleanup without additional checks
         self._perform_cleanup()
 
-        # Unregister atexit handler to prevent double cleanup
-        import contextlib
-
-        with contextlib.suppress(ValueError, AttributeError):
-            atexit.unregister(self._atexit_cleanup)
-
-        # Restore original handler and re-raise signal
-        if signum == signal.SIGINT and self._original_sigint_handler:
-            signal.signal(signal.SIGINT, self._original_sigint_handler)
-        elif signum == signal.SIGTERM and self._original_sigterm_handler:
-            signal.signal(signal.SIGTERM, self._original_sigterm_handler)
-
-        # Force immediate exit - use os._exit for immediate termination
+        # Force immediate exit - don't bother with complex cleanup of handlers
+        # Just exit immediately after cleanup is done
         import os
 
-        log_detail("Terminating program...")
+        # Flush logs to ensure they're visible
+        import sys
 
-        # os._exit() bypasses cleanup handlers and terminates immediately
-        # This is appropriate here since we've already done manual cleanup
-        try:
-            os._exit(1)
-        except Exception:
-            # Fallback: if os._exit somehow fails, use sys.exit
-            import sys
+        sys.stdout.flush()
+        sys.stderr.flush()
 
-            sys.exit(1)
+        # Force immediate termination
+        os._exit(1)
 
     def add_temp_directory(self, temp_dir: Path) -> Path:
         """Register a temporary directory for cleanup."""
