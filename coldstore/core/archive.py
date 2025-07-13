@@ -257,7 +257,7 @@ class ArchiveAnalyzer:
         return self.temp_dir
 
     def cleanup_temp(self):
-        """Clean up temporary extraction directory."""
+        """Clean up temporary extraction directory with enhanced error handling."""
         if self.temp_dir and self.temp_dir.exists():
             from coldstore.core.cleanup import (
                 _force_remove_directory,
@@ -265,15 +265,21 @@ class ArchiveAnalyzer:
             )
 
             try:
-                # Use the improved cleanup system
-                if _force_remove_directory(self.temp_dir):
-                    log_info("Temporary extraction directory cleaned up")
+                # Use the enhanced cleanup system with increased retries
+                if _force_remove_directory(self.temp_dir, max_retries=5):
+                    log_info("Temporary extraction directory cleaned up successfully")
                     # Remove from cleanup manager since we cleaned it manually
                     get_cleanup_manager().remove_temp_directory(self.temp_dir)
                 else:
                     log_warning(f"Failed to cleanup temp directory: {self.temp_dir}")
+                    log_detail(
+                        "Directory will be cleaned up on next startup or system restart"
+                    )
             except Exception as e:
                 log_warning(f"Failed to cleanup temp directory: {e}")
+                log_detail(
+                    "Directory will be cleaned up on next startup or system restart"
+                )
             finally:
                 self.temp_dir = None
 

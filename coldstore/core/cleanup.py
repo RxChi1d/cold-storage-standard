@@ -12,36 +12,54 @@ from pathlib import Path
 from coldstore.logger import log_detail, log_info, log_warning
 
 
-def _force_remove_file(file_path: Path, max_retries: int = 3) -> bool:
+def _force_remove_file(file_path: Path, max_retries: int = 8) -> bool:
     """
-    Force remove a file with retry logic for Windows file locking issues.
+    Force remove a file with enhanced retry logic for Windows file locking issues.
 
     Args:
         file_path: Path to the file to remove
-        max_retries: Maximum number of retry attempts
+        max_retries: Maximum number of retry attempts (increased for Windows)
 
     Returns:
         True if successfully removed, False otherwise
     """
+    if not file_path.exists():
+        return True
+
+    # Use Windows-specific removal on Windows systems
+    if platform.system() == "Windows":
+        try:
+            from coldstore.core.win_utils import windows_safe_remove
+
+            return windows_safe_remove(file_path, max_retries)
+        except ImportError:
+            log_warning(
+                "Windows utilities not available, falling back to standard removal"
+            )
+
+    # Standard removal for non-Windows systems or fallback
     for attempt in range(max_retries):
         try:
-            if file_path.exists():
-                # Try to remove read-only attribute on Windows
-                if platform.system() == "Windows":
-                    try:
-                        import stat
+            # Try to remove read-only attribute on Windows
+            if platform.system() == "Windows":
+                try:
+                    import stat
 
-                        file_path.chmod(stat.S_IWRITE)
-                    except (OSError, PermissionError):
-                        pass
+                    file_path.chmod(stat.S_IWRITE)
+                except (OSError, PermissionError):
+                    pass
 
-                file_path.unlink()
-                return True
-            return True  # File doesn't exist, consider it removed
+            file_path.unlink()
+            return True
+
         except (OSError, PermissionError) as e:
             if attempt < max_retries - 1:
-                # Wait a bit before retrying (helps with antivirus/indexing conflicts)
-                time.sleep(0.1 * (attempt + 1))
+                # Progressive wait times for better handling of file locks
+                wait_time = 0.5 + (attempt * 0.5)
+                log_detail(
+                    f"File removal attempt {attempt + 1} failed, retrying in {wait_time}s: {e}"
+                )
+                time.sleep(wait_time)
                 continue
             else:
                 log_warning(
@@ -51,9 +69,9 @@ def _force_remove_file(file_path: Path, max_retries: int = 3) -> bool:
     return False
 
 
-def _force_remove_directory(dir_path: Path, max_retries: int = 3) -> bool:
+def _force_remove_directory(dir_path: Path, max_retries: int = 5) -> bool:
     """
-    Force remove a directory with retry logic for Windows file locking issues.
+    Force remove a directory with enhanced retry logic for Windows file locking issues.
 
     Args:
         dir_path: Path to the directory to remove
@@ -62,35 +80,56 @@ def _force_remove_directory(dir_path: Path, max_retries: int = 3) -> bool:
     Returns:
         True if successfully removed, False otherwise
     """
+    if not dir_path.exists():
+        return True
+
+    # Use Windows-specific removal on Windows systems
+    if platform.system() == "Windows":
+        try:
+            from coldstore.core.win_utils import windows_safe_rmdir
+
+            return windows_safe_rmdir(dir_path, max_retries)
+        except ImportError:
+            log_warning(
+                "Windows utilities not available, falling back to standard removal"
+            )
+
+    # Standard removal for non-Windows systems or fallback
     import shutil
 
     for attempt in range(max_retries):
         try:
-            if dir_path.exists():
-                # On Windows, try to remove read-only attributes recursively
-                if platform.system() == "Windows":
-                    try:
-                        import stat
+            # On Windows, try to remove read-only attributes recursively
+            if platform.system() == "Windows":
+                try:
+                    import stat
 
-                        def handle_remove_readonly(func, path, exc):
-                            if exc[1].errno == 13:  # Permission denied
-                                Path(path).chmod(stat.S_IWRITE)
-                                func(path)
-                            else:
-                                raise
+                    def handle_remove_readonly(func, path, exc):
+                        if exc[1].errno == 13:  # Permission denied
+                            Path(path).chmod(stat.S_IWRITE)
+                            func(path)
+                        else:
+                            raise
 
-                        shutil.rmtree(dir_path, onerror=handle_remove_readonly)
-                    except Exception:
-                        # Fall back to normal removal
-                        shutil.rmtree(dir_path)
-                else:
+                    shutil.rmtree(dir_path, onerror=handle_remove_readonly)
+                except Exception:
+                    # Fall back to normal removal
                     shutil.rmtree(dir_path)
-                return True
-            return True  # Directory doesn't exist, consider it removed
+            else:
+                shutil.rmtree(dir_path)
+            return True
+
         except (OSError, PermissionError) as e:
             if attempt < max_retries - 1:
-                # Wait progressively longer before retrying
-                time.sleep(0.2 * (attempt + 1))
+                # Progressive wait times and additional cleanup attempts
+                wait_time = 1.0 + (attempt * 0.8)
+                log_detail(
+                    f"Directory removal attempt {attempt + 1} failed, retrying in {wait_time}s: {e}"
+                )
+
+                # Try to remove individual files that can be removed
+                _cleanup_directory_contents(dir_path)
+                time.sleep(wait_time)
                 continue
             else:
                 log_warning(
@@ -116,7 +155,7 @@ def _cleanup_directory_contents(dir_path: Path):
     try:
         for item in dir_path.rglob("*"):
             total_count += 1
-            if item.is_file() and _force_remove_file(item, max_retries=1):
+            if item.is_file() and _force_remove_file(item, max_retries=3):
                 removed_count += 1
     except (OSError, PermissionError):
         pass
@@ -128,7 +167,7 @@ def _cleanup_directory_contents(dir_path: Path):
 
 
 class CleanupManager:
-    """Manages cleanup of temporary resources with signal handling."""
+    """Manages cleanup of temporary resources with enhanced signal handling."""
 
     def __init__(self):
         self._cleanup_callbacks: list[Callable[[], None]] = []
@@ -138,6 +177,7 @@ class CleanupManager:
         self._signal_handlers_registered = False
         self._original_sigint_handler = None
         self._original_sigterm_handler = None
+        self._cleanup_in_progress = False
 
     def register_signal_handlers(self):
         """Register signal handlers for graceful cleanup."""
@@ -162,9 +202,18 @@ class CleanupManager:
             log_warning(f"Failed to register signal handlers: {e}")
 
     def _signal_handler(self, signum: int, frame):
-        """Handle signals by performing cleanup and exiting."""
+        """Handle signals by performing cleanup and exiting with enhanced timing."""
+        if self._cleanup_in_progress:
+            # If cleanup is already in progress, don't start another one
+            return
+
         signal_name = "SIGINT" if signum == signal.SIGINT else f"SIG{signum}"
         log_info(f"Received {signal_name}, performing cleanup...")
+
+        # Give processes more time to shutdown gracefully before cleanup
+        if platform.system() == "Windows":
+            log_detail("Giving processes time to shutdown gracefully...")
+            time.sleep(1.0)
 
         self.cleanup_all()
 
@@ -213,7 +262,7 @@ class CleanupManager:
                 self._temp_files.remove(temp_file)
 
     def cleanup_temp_directories(self):
-        """Clean up all registered temporary directories with improved error handling."""
+        """Clean up all registered temporary directories with enhanced error handling."""
         with self._lock:
             directories_to_clean = list(self._temp_directories)
             self._temp_directories.clear()
@@ -234,7 +283,7 @@ class CleanupManager:
             )
 
     def cleanup_temp_files(self):
-        """Clean up all registered temporary files with improved error handling."""
+        """Clean up all registered temporary files with enhanced error handling."""
         with self._lock:
             files_to_clean = list(self._temp_files)
             self._temp_files.clear()
@@ -265,23 +314,32 @@ class CleanupManager:
                 log_warning(f"Cleanup callback failed: {e}")
 
     def cleanup_all(self):
-        """Perform complete cleanup of all resources."""
-        if not self._signal_handlers_registered:
+        """Perform complete cleanup of all resources with enhanced error handling."""
+        if not self._signal_handlers_registered or self._cleanup_in_progress:
             return
 
-        log_info("Performing cleanup of temporary resources...")
+        self._cleanup_in_progress = True
+        try:
+            log_info("Performing cleanup of temporary resources...")
 
-        # Execute custom callbacks first
-        self.cleanup_callbacks()
+            # Execute custom callbacks first
+            self.cleanup_callbacks()
 
-        # Clean up files and directories
-        self.cleanup_temp_files()
-        self.cleanup_temp_directories()
+            # Clean up files and directories with enhanced timing
+            self.cleanup_temp_files()
 
-        log_info("Cleanup completed")
+            # Give some time between file and directory cleanup on Windows
+            if platform.system() == "Windows":
+                time.sleep(0.5)
+
+            self.cleanup_temp_directories()
+
+            log_info("Cleanup completed")
+        finally:
+            self._cleanup_in_progress = False
 
     def cleanup_orphaned_temps(self, prefix: str = "coldstore_"):
-        """Clean up any orphaned temporary files/directories from previous runs."""
+        """Clean up any orphaned temporary files/directories from previous runs with enhanced handling."""
         import tempfile
         import time
 
@@ -303,16 +361,16 @@ class CleanupManager:
         except OSError:
             pass  # Skip if we can't access temp directory
 
-        # Clean up orphaned items with improved error handling
+        # Clean up orphaned items with enhanced error handling
         cleaned_dirs = 0
         cleaned_files = 0
 
         for orphaned_dir in orphaned_dirs:
-            if _force_remove_directory(orphaned_dir, max_retries=1):
+            if _force_remove_directory(orphaned_dir, max_retries=3):
                 cleaned_dirs += 1
 
         for orphaned_file in orphaned_files:
-            if _force_remove_file(orphaned_file, max_retries=1):
+            if _force_remove_file(orphaned_file, max_retries=3):
                 cleaned_files += 1
 
         if cleaned_dirs > 0 or cleaned_files > 0:
@@ -361,7 +419,7 @@ def create_managed_temp_file(prefix: str = "coldstore_", suffix: str = "") -> Pa
 
 
 def register_cleanup_callback(callback: Callable[[], None]):
-    """Register a custom cleanup callback."""
+    """Register a cleanup callback to be executed during cleanup."""
     _cleanup_manager.add_cleanup_callback(callback)
 
 

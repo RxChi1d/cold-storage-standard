@@ -88,21 +88,38 @@ class FileOrganizer:
         return self.output_files.copy()
 
     def cleanup_partial_files(self, keep_types: list[str] | None = None):
-        """Clean up partial files after failed operations."""
+        """Clean up partial files after failed operations with enhanced error handling."""
         if keep_types is None:
             keep_types = []
 
         cleaned_files = []
+        failed_files = []
+
         for file_type, file_path in self.output_files.items():
             if file_type not in keep_types and file_path.exists():
                 try:
-                    file_path.unlink()
-                    cleaned_files.append(file_path.name)
-                except OSError as e:
+                    # Use enhanced cleanup system for better Windows compatibility
+                    from coldstore.core.cleanup import _force_remove_file
+
+                    if _force_remove_file(file_path, max_retries=5):
+                        cleaned_files.append(file_path.name)
+                    else:
+                        failed_files.append(file_path.name)
+                        log_warning(f"Failed to remove {file_path}")
+                except Exception as e:
+                    failed_files.append(file_path.name)
                     log_warning(f"Failed to remove {file_path}: {e}")
 
         if cleaned_files:
             log_info(f"Cleaned up partial files: {', '.join(cleaned_files)}")
+
+        if failed_files:
+            log_warning(
+                f"Failed to clean up {len(failed_files)} files: {', '.join(failed_files)}"
+            )
+            log_detail(
+                "These files will be cleaned up on next startup or system restart"
+            )
 
     def validate_output_permissions(self) -> bool:
         """Validate write permissions for output files."""

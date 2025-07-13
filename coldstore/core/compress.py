@@ -256,7 +256,12 @@ class CompressionEngine:
         threads: int = 0,
         long_mode: bool = True,
     ) -> bool:
-        """Compress tar file with zstd using optimized parameters."""
+        """Compress tar file with zstd using optimized parameters and enhanced file handle management."""
+        import contextlib
+
+        input_file = None
+        output_file = None
+
         try:
             log_step(f"Compressing with zstd (level {level})")
 
@@ -296,12 +301,18 @@ class CompressionEngine:
                 )
                 log_detail("Standard compression mode")
 
-            # Perform compression
-            with (
-                open(tar_path, "rb") as input_file,
-                open(zst_path, "wb") as output_file,
-            ):
-                cctx.copy_stream(input_file, output_file)
+            # Perform compression with explicit file handle management
+            input_file = open(tar_path, "rb")
+            output_file = open(zst_path, "wb")
+
+            # Use buffer to reduce memory usage and improve interruption handling
+            cctx.copy_stream(input_file, output_file)
+
+            # Explicitly close files before verification
+            input_file.close()
+            output_file.close()
+            input_file = None
+            output_file = None
 
             # Verify output and calculate compression ratio
             if not zst_path.exists():
@@ -322,11 +333,18 @@ class CompressionEngine:
         except Exception as e:
             log_error(f"Failed to compress with zstd: {e}")
             return False
+        finally:
+            # Ensure files are always closed, even on interruption
+            if input_file:
+                with contextlib.suppress(Exception):
+                    input_file.close()
+            if output_file:
+                with contextlib.suppress(Exception):
+                    output_file.close()
 
     def get_zstd_window_log(self, zst_path: Path) -> int:
         """Get window_log from zstd compressed file."""
         try:
-            # Read the frame header to extract window_log
             with open(zst_path, "rb") as f:
                 # Read enough bytes for frame header
                 header_bytes = f.read(18)
@@ -334,31 +352,19 @@ class CompressionEngine:
                 # Use module-level function to get frame parameters
                 frame_params = zstd.get_frame_parameters(header_bytes)
 
-                # Extract window size and convert to window_log
+                # Extract window_log from frame parameters
                 if hasattr(frame_params, "window_size") and frame_params.window_size:
-                    # window_size is in bytes, we need to calculate window_log
-                    # window_log = log2(window_size) = bit_length - 1
-                    window_size = frame_params.window_size
-                    if window_size > 0:
-                        window_log = window_size.bit_length() - 1
-                        log_detail(
-                            f"Detected window_size={window_size} bytes, window_log={window_log}"
-                        )
-                        return window_log
-                    else:
-                        log_detail(
-                            "Invalid window size in frame header, using default=27"
-                        )
-                        return 27
+                    import math
+
+                    window_log = int(math.log2(frame_params.window_size))
+                    return window_log
                 else:
-                    log_detail(
-                        "Window size not available in frame header, using default=27"
-                    )
-                    return 27
+                    # Default window_log if not available
+                    return 23
 
         except Exception as e:
-            log_detail(f"Could not detect window_log: {e}, using default=27")
-            return 27  # Safe default
+            log_warning(f"Failed to get window_log from zstd file: {e}")
+            return 23  # Default window_log
 
     def verify_zstd_integrity(self, zst_path: Path) -> bool:
         """Verify zstd file integrity."""
@@ -396,19 +402,22 @@ class CompressionEngine:
         return self.temp_tar_path
 
     def cleanup_temp_tar(self):
-        """Clean up temporary tar file."""
+        """Clean up temporary tar file with enhanced error handling."""
         if self.temp_tar_path and self.temp_tar_path.exists():
             from coldstore.core.cleanup import _force_remove_file, get_cleanup_manager
 
             try:
-                # Use the improved cleanup system
-                if _force_remove_file(self.temp_tar_path):
-                    log_detail("Temporary tar file cleaned up")
+                # Use the enhanced cleanup system
+                if _force_remove_file(self.temp_tar_path, max_retries=8):
+                    log_detail("Temporary tar file cleaned up successfully")
                     # Remove from cleanup manager since we cleaned it manually
                     get_cleanup_manager().remove_temp_file(self.temp_tar_path)
                 else:
                     log_warning(
                         f"Failed to cleanup temp tar file: {self.temp_tar_path}"
+                    )
+                    log_detail(
+                        "File will be cleaned up on next startup or system restart"
                     )
             except Exception as e:
                 log_warning(f"Failed to cleanup temp tar file: {e}")
@@ -424,7 +433,7 @@ class CompressionEngine:
         long_mode: bool = True,
         enable_check: bool = True,
     ) -> bool:
-        """Compress directory using separated mode (tar → zstd)."""
+        """Compress directory using separated mode (tar → zstd) with enhanced cleanup."""
         try:
             log_info(f"Starting compression: {source_path} → {output_path}")
 
@@ -457,8 +466,11 @@ class CompressionEngine:
             return False
 
         finally:
-            # Step 6: Clean up temporary files
-            self.cleanup_temp_tar()
+            # Step 6: Clean up temporary files with enhanced cleanup
+            try:
+                self.cleanup_temp_tar()
+            except Exception as cleanup_error:
+                log_warning(f"Cleanup during compression failed: {cleanup_error}")
 
     def get_compression_info(self) -> dict:
         """Get current compression configuration."""
@@ -470,7 +482,12 @@ class CompressionEngine:
         }
 
     def decompress_with_zstd(self, zst_path: Path, tar_path: Path) -> bool:
-        """Decompress zstd file to tar file using detected window_log."""
+        """Decompress zstd file to tar file using detected window_log with enhanced file handle management."""
+        import contextlib
+
+        input_file = None
+        output_file = None
+
         try:
             log_step(f"Decompressing zstd file: {zst_path.name}")
 
@@ -488,12 +505,17 @@ class CompressionEngine:
             # Create decompressor with appropriate settings
             decompressor = zstd.ZstdDecompressor()
 
-            # Decompress file
-            with (
-                open(zst_path, "rb") as input_file,
-                open(tar_path, "wb") as output_file,
-            ):
-                decompressor.copy_stream(input_file, output_file)
+            # Decompress file with explicit file handle management
+            input_file = open(zst_path, "rb")
+            output_file = open(tar_path, "wb")
+
+            decompressor.copy_stream(input_file, output_file)
+
+            # Explicitly close files before verification
+            input_file.close()
+            output_file.close()
+            input_file = None
+            output_file = None
 
             # Verify output file was created
             if not tar_path.exists():
@@ -512,6 +534,14 @@ class CompressionEngine:
         except Exception as e:
             log_error(f"Failed to decompress zstd file: {e}")
             return False
+        finally:
+            # Ensure files are always closed, even on interruption
+            if input_file:
+                with contextlib.suppress(Exception):
+                    input_file.close()
+            if output_file:
+                with contextlib.suppress(Exception):
+                    output_file.close()
 
     def extract_tar_archive(self, tar_path: Path, output_dir: Path) -> bool:
         """Extract tar archive to output directory."""
@@ -553,7 +583,7 @@ class CompressionEngine:
     def decompress_archive(
         self, zst_path: Path, output_dir: Path, enable_check: bool = True
     ) -> bool:
-        """Complete two-stage decompression (zstd → tar → directory)."""
+        """Complete two-stage decompression (zstd → tar → directory) with enhanced cleanup."""
         try:
             log_info(f"Starting decompression: {zst_path} → {output_dir}")
 
@@ -586,8 +616,11 @@ class CompressionEngine:
             return False
 
         finally:
-            # Step 6: Clean up temporary files
-            self.cleanup_temp_tar()
+            # Step 6: Clean up temporary files with enhanced cleanup
+            try:
+                self.cleanup_temp_tar()
+            except Exception as cleanup_error:
+                log_warning(f"Cleanup during decompression failed: {cleanup_error}")
 
     def get_archive_info(self, zst_path: Path) -> dict:
         """Get archive information without full extraction."""
@@ -627,9 +660,12 @@ class CompressionEngine:
 
         finally:
             # Clean up temporary files
-            self.cleanup_temp_tar()
+            try:
+                self.cleanup_temp_tar()
+            except Exception as cleanup_error:
+                log_warning(f"Cleanup during archive info failed: {cleanup_error}")
 
 
 def create_compressor() -> CompressionEngine:
-    """Create a compression engine instance."""
+    """Create and return a new compression engine instance."""
     return CompressionEngine()

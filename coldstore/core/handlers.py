@@ -317,9 +317,10 @@ class ZipHandler(BaseArchiveHandler):
                         target_path.parent.mkdir(parents=True, exist_ok=True)
 
                         # Extract file content
-                        with archive.open(info) as source, open(
-                            target_path, "wb"
-                        ) as target:
+                        with (
+                            archive.open(info) as source,
+                            open(target_path, "wb") as target,
+                        ):
                             target.write(source.read())
 
                     # Log renamed files

@@ -277,8 +277,24 @@ def main(
             log_success("Archive conversion completed successfully!")
 
     finally:
-        # Cleanup temporary files
+        # Enhanced cleanup with better error handling
+        cleanup_errors = []
+
         if hasattr(analyzer, "cleanup_temp"):
-            analyzer.cleanup_temp()
+            try:
+                analyzer.cleanup_temp()
+            except Exception as e:
+                cleanup_errors.append(f"analyzer cleanup: {e}")
+
         if hasattr(compressor, "cleanup_temp_tar"):
-            compressor.cleanup_temp_tar()
+            try:
+                compressor.cleanup_temp_tar()
+            except Exception as e:
+                cleanup_errors.append(f"compressor cleanup: {e}")
+
+        # Report any cleanup errors
+        if cleanup_errors:
+            log_warning(f"Cleanup errors occurred: {'; '.join(cleanup_errors)}")
+            log_detail(
+                "Temporary files will be cleaned up on next startup or system restart"
+            )
