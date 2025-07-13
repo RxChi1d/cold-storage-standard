@@ -273,15 +273,20 @@ class CompressionEngine:
             # Configure compressor parameters
             if long_mode and level >= 10:
                 # Use long mode for high compression levels
-                # Note: compression_params is mutually exclusive with level and write_checksum parameters
+                # Note: compression_params is mutually exclusive with level, write_checksum, and threads parameters
+                # threads must be specified in compression_params, not in ZstdCompressor
                 compression_params = zstd.ZstdCompressionParameters.from_level(
-                    level, window_log=window_log, write_checksum=True
+                    level,
+                    window_log=window_log,
+                    write_checksum=True,
+                    threads=threads if threads > 0 else 0,
                 )
                 cctx = zstd.ZstdCompressor(
                     compression_params=compression_params,
-                    threads=threads if threads > 0 else 0,
                 )
-                log_detail(f"Long mode enabled with window_log={window_log}")
+                log_detail(
+                    f"Long mode enabled with window_log={window_log}, threads={threads if threads > 0 else 'auto'}"
+                )
             else:
                 # Standard compression for lower levels
                 cctx = zstd.ZstdCompressor(
