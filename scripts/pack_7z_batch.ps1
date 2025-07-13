@@ -166,8 +166,7 @@ try {
             $percentage = [math]::Round(($currentFile / $sevenZipFiles.Count) * 100, 1)
             $remaining = $sevenZipFiles.Count - $currentFile
 
-            # Update PowerShell progress bar
-            Write-Progress -Activity "Processing 7z files" -Status "Processing $($file.Name)" -PercentComplete $percentage -CurrentOperation "File $currentFile of $($sevenZipFiles.Count)"
+            # Progress tracking (text-based display only)
 
             # Prepare progress content
             $progressContent = "[$currentFile/$($sevenZipFiles.Count)] ($percentage%) Processing: $($file.Name)"
@@ -211,8 +210,7 @@ try {
             }
         }
 
-        # Complete the progress bar
-        Write-Progress -Activity "Processing 7z files" -Completed
+        # Processing completed
 
         # Display result summary
         Write-Host ""
@@ -239,14 +237,11 @@ try {
         }
     }
     finally {
-        # Complete any remaining progress display
-        Write-Progress -Activity "Processing 7z files" -Completed
         # Restore original directory
         Pop-Location
     }
 }
 catch {
-    Write-Progress -Activity "Processing 7z files" -Completed
     Write-LogError "Script execution failed: $($_.Exception.Message)"
     exit 1
 }
