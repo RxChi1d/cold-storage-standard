@@ -3,6 +3,8 @@
 import bz2
 import gzip
 import lzma
+import platform
+import re
 import tarfile
 import zipfile
 from abc import ABC, abstractmethod
@@ -11,6 +13,116 @@ from pathlib import Path
 import py7zr
 
 from coldstore.logger import log_detail, log_error, log_info, log_warning
+
+
+def sanitize_filename_for_windows(filename: str) -> str:
+    """
+    Clean filename to be valid on Windows systems.
+
+    Args:
+        filename: Original filename
+
+    Returns:
+        Sanitized filename safe for Windows
+    """
+    if not filename:
+        return filename
+
+    # Replace Windows invalid characters with underscores
+    invalid_chars = '<>:"|?*'
+    sanitized = filename
+    for char in invalid_chars:
+        sanitized = sanitized.replace(char, "_")
+
+    # Replace control characters (0-31) and DEL (127)
+    sanitized = re.sub(r"[\x00-\x1f\x7f]", "_", sanitized)
+
+    # Remove trailing dots and spaces (Windows doesn't allow these)
+    sanitized = sanitized.rstrip(". ")
+
+    # Handle Windows reserved names
+    reserved_names = {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        "COM1",
+        "COM2",
+        "COM3",
+        "COM4",
+        "COM5",
+        "COM6",
+        "COM7",
+        "COM8",
+        "COM9",
+        "LPT1",
+        "LPT2",
+        "LPT3",
+        "LPT4",
+        "LPT5",
+        "LPT6",
+        "LPT7",
+        "LPT8",
+        "LPT9",
+    }
+
+    # Check if the filename (without extension) is a reserved name
+    name_part = Path(sanitized).stem.upper()
+    if name_part in reserved_names:
+        extension = Path(sanitized).suffix
+        sanitized = f"{name_part}_file{extension}"
+
+    # Limit filename length (Windows has a 255 character limit for filenames)
+    if len(sanitized) > 255:
+        name_part = Path(sanitized).stem
+        extension = Path(sanitized).suffix
+        max_name_length = 255 - len(extension)
+        if max_name_length > 0:
+            sanitized = name_part[:max_name_length] + extension
+        else:
+            sanitized = sanitized[:255]
+
+    # Ensure we don't return an empty filename
+    if not sanitized or sanitized in (".", ".."):
+        sanitized = "renamed_file"
+
+    return sanitized
+
+
+def sanitize_path_for_windows(path: str) -> str:
+    """
+    Clean entire path to be valid on Windows systems.
+
+    Args:
+        path: Original path string
+
+    Returns:
+        Sanitized path safe for Windows
+    """
+    if not path:
+        return path
+
+    # Split path into components and sanitize each part
+    path_obj = Path(path)
+    parts = list(path_obj.parts)
+
+    sanitized_parts = []
+    for part in parts:
+        if part in ("/", "\\"):  # Skip root separators
+            continue
+        sanitized_part = sanitize_filename_for_windows(part)
+        sanitized_parts.append(sanitized_part)
+
+    # Reconstruct the path
+    if not sanitized_parts:
+        return "extracted_file"
+
+    return str(Path(*sanitized_parts))
+
+
+def needs_windows_sanitization() -> bool:
+    """Check if we need to apply Windows filename sanitization."""
+    return platform.system() == "Windows"
 
 
 class ArchiveEntry:
@@ -86,8 +198,41 @@ class SevenZipHandler(BaseArchiveHandler):
         """Extract all contents from 7z archive."""
         try:
             extract_to.mkdir(parents=True, exist_ok=True)
+
             with py7zr.SevenZipFile(self.archive_path, mode="r") as archive:
-                archive.extractall(path=extract_to)
+                if needs_windows_sanitization():
+                    # Manual extraction with filename sanitization
+                    renamed_files = []
+
+                    # Get all files with their data
+                    all_files = archive.readall()
+
+                    for original_path, file_data in all_files.items():
+                        sanitized_path = sanitize_path_for_windows(original_path)
+
+                        if original_path != sanitized_path:
+                            renamed_files.append((original_path, sanitized_path))
+
+                        # Create target path
+                        target_path = extract_to / sanitized_path
+                        target_path.parent.mkdir(parents=True, exist_ok=True)
+
+                        # Write file data if it's not a directory
+                        if file_data and not original_path.endswith("/"):
+                            with open(target_path, "wb") as f:
+                                f.write(file_data.read())
+
+                    # Log renamed files
+                    if renamed_files:
+                        log_info(
+                            f"Renamed {len(renamed_files)} files for Windows compatibility:"
+                        )
+                        for original, sanitized in renamed_files:
+                            log_detail(f"  '{original}' -> '{sanitized}'")
+                else:
+                    # Standard extraction for non-Windows platforms
+                    archive.extractall(path=extract_to)
+
             log_info(f"7z archive extracted to: {extract_to}")
             return True
         except Exception as e:
@@ -147,8 +292,47 @@ class ZipHandler(BaseArchiveHandler):
         """Extract all contents from ZIP archive."""
         try:
             extract_to.mkdir(parents=True, exist_ok=True)
+
             with zipfile.ZipFile(self.archive_path, "r") as archive:
-                archive.extractall(path=extract_to)
+                if needs_windows_sanitization():
+                    # Manual extraction with filename sanitization
+                    renamed_files = []
+
+                    for info in archive.infolist():
+                        original_path = info.filename
+                        sanitized_path = sanitize_path_for_windows(original_path)
+
+                        if original_path != sanitized_path:
+                            renamed_files.append((original_path, sanitized_path))
+
+                        # Create target path
+                        target_path = extract_to / sanitized_path
+
+                        # Skip directories or create them
+                        if original_path.endswith("/") or info.is_dir():
+                            target_path.mkdir(parents=True, exist_ok=True)
+                            continue
+
+                        # Ensure parent directory exists
+                        target_path.parent.mkdir(parents=True, exist_ok=True)
+
+                        # Extract file content
+                        with archive.open(info) as source, open(
+                            target_path, "wb"
+                        ) as target:
+                            target.write(source.read())
+
+                    # Log renamed files
+                    if renamed_files:
+                        log_info(
+                            f"Renamed {len(renamed_files)} files for Windows compatibility:"
+                        )
+                        for original, sanitized in renamed_files:
+                            log_detail(f"  '{original}' -> '{sanitized}'")
+                else:
+                    # Standard extraction for non-Windows platforms
+                    archive.extractall(path=extract_to)
+
             log_info(f"ZIP archive extracted to: {extract_to}")
             return True
         except Exception as e:
@@ -348,8 +532,55 @@ class TarHandler(BaseArchiveHandler):
         """Extract all contents from TAR archive."""
         try:
             extract_to.mkdir(parents=True, exist_ok=True)
+
             with tarfile.open(self.archive_path, "r:*") as archive:
-                archive.extractall(path=extract_to)
+                if needs_windows_sanitization():
+                    # Manual extraction with filename sanitization
+                    renamed_files = []
+
+                    for member in archive.getmembers():
+                        original_path = member.name
+                        sanitized_path = sanitize_path_for_windows(original_path)
+
+                        if original_path != sanitized_path:
+                            renamed_files.append((original_path, sanitized_path))
+
+                        # Create target path
+                        target_path = extract_to / sanitized_path
+
+                        # Handle directories
+                        if member.isdir():
+                            target_path.mkdir(parents=True, exist_ok=True)
+                            continue
+
+                        # Ensure parent directory exists
+                        target_path.parent.mkdir(parents=True, exist_ok=True)
+
+                        # Extract file
+                        if member.isfile():
+                            with archive.extractfile(member) as source:
+                                if source:
+                                    with open(target_path, "wb") as target:
+                                        target.write(source.read())
+                        elif member.islnk() or member.issym():
+                            # Handle links by copying the original member extraction
+                            # but to the sanitized path
+                            original_member = member
+                            member.name = sanitized_path
+                            archive.extract(member, path=extract_to)
+                            member.name = original_member.name  # Restore original name
+
+                    # Log renamed files
+                    if renamed_files:
+                        log_info(
+                            f"Renamed {len(renamed_files)} files for Windows compatibility:"
+                        )
+                        for original, sanitized in renamed_files:
+                            log_detail(f"  '{original}' -> '{sanitized}'")
+                else:
+                    # Standard extraction for non-Windows platforms
+                    archive.extractall(path=extract_to)
+
             log_info(f"TAR archive extracted to: {extract_to}")
             return True
         except Exception as e:
@@ -572,5 +803,4 @@ def create_handler(archive_path: Path, format_name: str) -> BaseArchiveHandler |
         return handler_class(archive_path)
 
     log_error(f"No handler available for format: {format_name}")
-    return None
     return None
