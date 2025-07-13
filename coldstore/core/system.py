@@ -7,7 +7,7 @@ from pathlib import Path
 import psutil
 from rich.table import Table
 
-from coldstore.logging import console, log_detail, log_error, log_info, log_warning
+from coldstore.logger import console, log_detail, log_error, log_info, log_warning
 
 
 class SystemChecker:
@@ -188,7 +188,7 @@ class SystemChecker:
     def show_system_info(self):
         """Display system information in a nice table."""
         # Import here to avoid circular imports
-        from coldstore.logging import _should_show_info
+        from coldstore.logger import _should_show_info
 
         if not _should_show_info():
             return

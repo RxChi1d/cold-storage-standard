@@ -5,7 +5,7 @@ import shutil
 import subprocess
 from typing import Any
 
-from ..logging import log_error, log_info, log_warning
+from ..logger import log_error, log_info, log_warning
 
 
 def logger_info(msg):

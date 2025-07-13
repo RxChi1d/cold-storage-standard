@@ -8,7 +8,7 @@ import typer
 from coldstore.commands.verify import show_verification_results, verify_single_archive
 from coldstore.core.compress import create_compressor
 from coldstore.core.system import check_decompression_requirements
-from coldstore.logging import (
+from coldstore.logger import (
     log_error,
     log_info,
     log_success,

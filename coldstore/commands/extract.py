@@ -7,7 +7,7 @@ import typer
 
 from coldstore.core.compress import create_compressor
 from coldstore.core.system import check_decompression_requirements
-from coldstore.logging import (
+from coldstore.logger import (
     log_error,
     log_info,
     log_success,

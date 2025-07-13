@@ -7,7 +7,7 @@ import typer
 
 # PAR2 functionality is now handled directly by the PAR2Engine class
 # PAR2 system tools are now handled by the PAR2Engine class
-from coldstore.logging import (
+from coldstore.logger import (
     log_error,
     log_info,
     log_success,

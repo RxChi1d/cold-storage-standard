@@ -3,7 +3,7 @@
 from enum import Enum
 from pathlib import Path
 
-from coldstore.logging import log_detail
+from coldstore.logger import log_detail
 
 
 class ArchiveFormat(Enum):

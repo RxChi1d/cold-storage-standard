@@ -13,7 +13,7 @@ from coldstore.core.organizer import create_organizer
 # PAR2 functionality is now handled directly by the PAR2Engine class
 from coldstore.core.progress import create_progress_manager
 from coldstore.core.system import check_system_requirements
-from coldstore.logging import (
+from coldstore.logger import (
     log_detail,
     log_error,
     log_info,

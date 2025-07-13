@@ -4,7 +4,7 @@ from pathlib import Path
 
 from coldstore.core.format_detector import ArchiveFormat, create_format_detector
 from coldstore.core.handlers import ArchiveEntry, BaseArchiveHandler, create_handler
-from coldstore.logging import log_detail, log_error, log_info, log_step, log_warning
+from coldstore.logger import log_detail, log_error, log_info, log_step, log_warning
 
 
 class ArchiveAnalyzer:

@@ -3,7 +3,7 @@
 import shutil
 import subprocess
 
-from coldstore.logging import log_detail, log_error, log_info
+from coldstore.logger import log_detail, log_error, log_info
 
 
 class SystemToolChecker:

@@ -9,7 +9,7 @@ from rich.table import Table
 from coldstore.core.compress import create_compressor
 from coldstore.core.hash import create_hash_generator
 from coldstore.core.par2 import PAR2Engine
-from coldstore.logging import (
+from coldstore.logger import (
     _should_show_info,
     console,
     log_detail,

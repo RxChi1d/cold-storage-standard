@@ -5,7 +5,7 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
-from coldstore.logging import setup_logging
+from coldstore.logger import setup_logging
 
 app = typer.Typer(
     name="coldstore",

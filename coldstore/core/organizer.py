@@ -3,7 +3,7 @@
 import os
 from pathlib import Path
 
-from coldstore.logging import log_detail, log_info, log_step, log_warning
+from coldstore.logger import log_detail, log_info, log_step, log_warning
 
 
 class FileOrganizer:
@@ -128,7 +128,7 @@ class FileOrganizer:
     def show_output_summary(self):
         """Show summary of output files and their status."""
         # Import here to avoid circular imports
-        from coldstore.logging import _should_show_detail
+        from coldstore.logger import _should_show_detail
 
         if not _should_show_detail():
             return

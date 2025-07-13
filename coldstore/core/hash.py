@@ -5,7 +5,7 @@ from pathlib import Path
 
 import blake3
 
-from coldstore.logging import log_error, log_info, log_step, log_warning
+from coldstore.logger import log_error, log_info, log_step, log_warning
 
 
 class HashGenerator:

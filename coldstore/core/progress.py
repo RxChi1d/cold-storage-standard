@@ -13,7 +13,7 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-from coldstore.logging import console
+from coldstore.logger import console
 
 
 class ProgressManager:

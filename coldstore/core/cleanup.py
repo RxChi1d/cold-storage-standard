@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from coldstore.logging import log_detail, log_info, log_warning
+from coldstore.logger import log_detail, log_info, log_warning
 
 
 def _force_remove_file(file_path: Path, max_retries: int = 3) -> bool:

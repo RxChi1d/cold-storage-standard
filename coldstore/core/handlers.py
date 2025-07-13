@@ -10,7 +10,7 @@ from pathlib import Path
 
 import py7zr
 
-from coldstore.logging import log_detail, log_error, log_info, log_warning
+from coldstore.logger import log_detail, log_error, log_info, log_warning
 
 
 class ArchiveEntry:

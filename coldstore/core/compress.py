@@ -1,11 +1,13 @@
 """Compression engine for separated mode (tar → zstd)."""
 
+import platform
+import sys
 import tarfile
 from pathlib import Path
 
 import zstandard as zstd
 
-from coldstore.logging import log_detail, log_error, log_info, log_step, log_warning
+from coldstore.logger import log_detail, log_error, log_info, log_step, log_warning
 
 
 class CompressionEngine:
@@ -85,14 +87,31 @@ class CompressionEngine:
 
     def _calculate_optimal_window_log(self, file_size: int) -> int:
         """
-        Calculate optimal window_log based on file size.
+        Calculate optimal window_log based on file size with platform-specific limits.
 
         Window log guidelines (conservative for reliability):
         - Small files (<2MB): window_log=20 (1MB window, ~1MB memory)
         - Medium files (2-20MB): window_log=24 (16MB window, ~16MB memory)
         - Large files (20-200MB): window_log=27 (128MB window, ~128MB memory)
-        - Very large files (>200MB): window_log=31 (2GB window, ~2GB memory)
+        - Very large files (>200MB): window_log=28-31 (platform dependent)
+
+        Platform limits:
+        - 32-bit systems: max window_log=30 (1GB limit)
+        - 64-bit systems: max window_log=31 (2GB limit)
+        - Windows: Conservative limits due to virtual memory allocation
         """
+        # Determine platform-specific maximum window_log
+        is_64bit = sys.maxsize > 2**32
+        is_windows = platform.system() == "Windows"
+
+        if is_64bit:
+            # 64-bit systems can handle larger windows
+            max_window_log = 30 if is_windows else 31
+        else:
+            # 32-bit systems are more limited
+            max_window_log = 29 if is_windows else 30
+
+        # Calculate optimal window_log based on file size
         if file_size < 2 * 1024 * 1024:  # < 2MB
             return 20  # 1MB window
         elif file_size < 20 * 1024 * 1024:  # < 20MB
@@ -100,7 +119,11 @@ class CompressionEngine:
         elif file_size < 200 * 1024 * 1024:  # < 200MB
             return 27  # 128MB window
         else:  # >= 200MB
-            return 31  # 2GB window (original --long=31)
+            # Use platform-appropriate maximum
+            log_detail(
+                f"Large file detected, using max window_log={max_window_log} for platform compatibility"
+            )
+            return max_window_log
 
     def _get_sorted_file_list(self, directory: Path) -> list[tuple[Path, Path]]:
         """
@@ -250,26 +273,29 @@ class CompressionEngine:
             # Configure compressor parameters
             if long_mode and level >= 10:
                 # Use long mode for high compression levels
+                # Note: compression_params is mutually exclusive with level and write_checksum parameters
+                compression_params = zstd.ZstdCompressionParameters.from_level(
+                    level, window_log=window_log, write_checksum=True
+                )
                 cctx = zstd.ZstdCompressor(
-                    level=level,
+                    compression_params=compression_params,
                     threads=threads if threads > 0 else 0,
-                    write_checksum=True,
-                    params=zstd.CompressionParameters.from_level(
-                        level, window_log=window_log
-                    ),
                 )
                 log_detail(f"Long mode enabled with window_log={window_log}")
             else:
                 # Standard compression for lower levels
                 cctx = zstd.ZstdCompressor(
-                    level=level, threads=threads if threads > 0 else 0
+                    level=level,
+                    threads=threads if threads > 0 else 0,
+                    write_checksum=True,
                 )
                 log_detail("Standard compression mode")
 
             # Perform compression
-            with open(tar_path, "rb") as input_file, open(
-                zst_path, "wb"
-            ) as output_file:
+            with (
+                open(tar_path, "rb") as input_file,
+                open(zst_path, "wb") as output_file,
+            ):
                 cctx.copy_stream(input_file, output_file)
 
             # Verify output and calculate compression ratio
@@ -297,16 +323,33 @@ class CompressionEngine:
         try:
             # Read the frame header to extract window_log
             with open(zst_path, "rb") as f:
-                dctx = zstd.ZstdDecompressor()
-                frame_header = dctx.frame_header_size(f.read(18))  # Read enough bytes
+                # Read enough bytes for frame header
+                header_bytes = f.read(18)
 
-                f.seek(0)
-                header_bytes = f.read(frame_header)
-                params = dctx.frame_header_params(header_bytes)
+                # Use module-level function to get frame parameters
+                frame_params = zstd.get_frame_parameters(header_bytes)
 
-                window_log = params.window_log if params.window_log else 27  # Default
-                log_detail(f"Detected window_log={window_log} from compressed file")
-                return window_log
+                # Extract window size and convert to window_log
+                if hasattr(frame_params, "window_size") and frame_params.window_size:
+                    # window_size is in bytes, we need to calculate window_log
+                    # window_log = log2(window_size) = bit_length - 1
+                    window_size = frame_params.window_size
+                    if window_size > 0:
+                        window_log = window_size.bit_length() - 1
+                        log_detail(
+                            f"Detected window_size={window_size} bytes, window_log={window_log}"
+                        )
+                        return window_log
+                    else:
+                        log_detail(
+                            "Invalid window size in frame header, using default=27"
+                        )
+                        return 27
+                else:
+                    log_detail(
+                        "Window size not available in frame header, using default=27"
+                    )
+                    return 27
 
         except Exception as e:
             log_detail(f"Could not detect window_log: {e}, using default=27")
@@ -317,18 +360,20 @@ class CompressionEngine:
         try:
             log_step("Verifying zstd file integrity")
 
-            # Try to create decompressor and read header
+            # Try to read and validate the frame header
             with open(zst_path, "rb") as f:
-                dctx = zstd.ZstdDecompressor()
-                # Try to read and validate the frame header
-                header_size = dctx.frame_header_size(f.read(18))
-                f.seek(0)
-                header_bytes = f.read(header_size)
-                params = dctx.frame_header_params(header_bytes)
+                # Read enough bytes for frame header
+                header_bytes = f.read(18)
 
-                log_detail(
-                    f"Zstd file has valid header, window_log={params.window_log}"
-                )
+                # Use module-level function to validate frame header
+                frame_params = zstd.get_frame_parameters(header_bytes)
+
+                # If we can read frame parameters, the header is valid
+                if hasattr(frame_params, "window_size"):
+                    window_size = frame_params.window_size or "unknown"
+                    log_detail(f"Zstd file has valid header, window_size={window_size}")
+                else:
+                    log_detail("Zstd file has valid header format")
 
             log_detail("✅ Zstd integrity verification successful")
             return True
