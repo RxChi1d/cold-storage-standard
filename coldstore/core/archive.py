@@ -258,11 +258,20 @@ class ArchiveAnalyzer:
 
     def cleanup_temp(self):
         """Clean up temporary extraction directory with enhanced error handling."""
+        # Check if global cleanup is already in progress
+        from coldstore.core.cleanup import get_cleanup_manager
+
+        cleanup_manager = get_cleanup_manager()
+        with cleanup_manager._lock:
+            if cleanup_manager._cleanup_in_progress:
+                # Global cleanup is already handling this, skip to avoid conflict
+                log_detail(
+                    "Skipping analyzer cleanup - global cleanup already in progress"
+                )
+                return
+
         if self.temp_dir and self.temp_dir.exists():
-            from coldstore.core.cleanup import (
-                _force_remove_directory,
-                get_cleanup_manager,
-            )
+            from coldstore.core.cleanup import _force_remove_directory
 
             try:
                 # Use the enhanced cleanup system with increased retries

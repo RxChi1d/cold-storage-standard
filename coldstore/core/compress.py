@@ -403,8 +403,20 @@ class CompressionEngine:
 
     def cleanup_temp_tar(self):
         """Clean up temporary tar file with enhanced error handling."""
+        # Check if global cleanup is already in progress
+        from coldstore.core.cleanup import get_cleanup_manager
+
+        cleanup_manager = get_cleanup_manager()
+        with cleanup_manager._lock:
+            if cleanup_manager._cleanup_in_progress:
+                # Global cleanup is already handling this, skip to avoid conflict
+                log_detail(
+                    "Skipping compressor cleanup - global cleanup already in progress"
+                )
+                return
+
         if self.temp_tar_path and self.temp_tar_path.exists():
-            from coldstore.core.cleanup import _force_remove_file, get_cleanup_manager
+            from coldstore.core.cleanup import _force_remove_file
 
             try:
                 # Use the enhanced cleanup system
