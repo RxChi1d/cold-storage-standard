@@ -253,10 +253,20 @@ class CleanupManager:
         elif signum == signal.SIGTERM and self._original_sigterm_handler:
             signal.signal(signal.SIGTERM, self._original_sigterm_handler)
 
-        # Exit gracefully
-        import sys
+        # Force immediate exit - use os._exit for immediate termination
+        import os
 
-        sys.exit(1)
+        log_detail("Terminating program...")
+
+        # os._exit() bypasses cleanup handlers and terminates immediately
+        # This is appropriate here since we've already done manual cleanup
+        try:
+            os._exit(1)
+        except Exception:
+            # Fallback: if os._exit somehow fails, use sys.exit
+            import sys
+
+            sys.exit(1)
 
     def add_temp_directory(self, temp_dir: Path) -> Path:
         """Register a temporary directory for cleanup."""
