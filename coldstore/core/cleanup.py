@@ -193,19 +193,42 @@ class CleanupManager:
                 signal.SIGTERM, self._signal_handler
             )
 
-            # Register atexit handler
-            atexit.register(self.cleanup_all)
+            # Register atexit handler for normal program termination
+            atexit.register(self._atexit_cleanup)
 
             self._signal_handlers_registered = True
             log_detail("Signal handlers registered for cleanup")
         except (ValueError, OSError) as e:
             log_warning(f"Failed to register signal handlers: {e}")
 
+    def _atexit_cleanup(self):
+        """Cleanup method called on normal program termination."""
+        # Only run if not already cleaned up by signal handler
+        with self._lock:
+            if self._cleanup_in_progress:
+                return
+            # Check if we have anything to clean up
+            if not (
+                self._temp_directories or self._temp_files or self._cleanup_callbacks
+            ):
+                return
+            self._cleanup_in_progress = True
+
+        try:
+            log_detail("Performing final cleanup on program termination...")
+            self._perform_cleanup()
+        finally:
+            with self._lock:
+                self._cleanup_in_progress = False
+
     def _signal_handler(self, signum: int, frame):
         """Handle signals by performing cleanup and exiting with enhanced timing."""
-        if self._cleanup_in_progress:
-            # If cleanup is already in progress, don't start another one
-            return
+        # Immediately set cleanup flag to prevent race conditions
+        with self._lock:
+            if self._cleanup_in_progress:
+                # If cleanup is already in progress, don't start another one
+                return
+            self._cleanup_in_progress = True
 
         signal_name = "SIGINT" if signum == signal.SIGINT else f"SIG{signum}"
         log_info(f"Received {signal_name}, performing cleanup...")
@@ -215,7 +238,14 @@ class CleanupManager:
             log_detail("Giving processes time to shutdown gracefully...")
             time.sleep(1.0)
 
-        self.cleanup_all()
+        # Call internal cleanup without additional checks
+        self._perform_cleanup()
+
+        # Unregister atexit handler to prevent double cleanup
+        import contextlib
+
+        with contextlib.suppress(ValueError, AttributeError):
+            atexit.unregister(self._atexit_cleanup)
 
         # Restore original handler and re-raise signal
         if signum == signal.SIGINT and self._original_sigint_handler:
@@ -313,30 +343,48 @@ class CleanupManager:
             except Exception as e:
                 log_warning(f"Cleanup callback failed: {e}")
 
-    def cleanup_all(self):
-        """Perform complete cleanup of all resources with enhanced error handling."""
-        if not self._signal_handlers_registered or self._cleanup_in_progress:
+    def _perform_cleanup(self):
+        """Internal cleanup method without state checks."""
+        # Check if there's anything to clean up
+        has_callbacks = bool(self._cleanup_callbacks)
+        has_files = bool(self._temp_files)
+        has_directories = bool(self._temp_directories)
+
+        if not (has_callbacks or has_files or has_directories):
+            # Nothing to clean up
             return
 
-        self._cleanup_in_progress = True
-        try:
-            log_info("Performing cleanup of temporary resources...")
+        log_info("Performing cleanup of temporary resources...")
 
-            # Execute custom callbacks first
+        # Execute custom callbacks first
+        if has_callbacks:
             self.cleanup_callbacks()
 
-            # Clean up files and directories with enhanced timing
+        # Clean up files and directories with enhanced timing
+        if has_files:
             self.cleanup_temp_files()
 
-            # Give some time between file and directory cleanup on Windows
-            if platform.system() == "Windows":
-                time.sleep(0.5)
+        # Give some time between file and directory cleanup on Windows
+        if has_directories and platform.system() == "Windows":
+            time.sleep(0.5)
 
+        if has_directories:
             self.cleanup_temp_directories()
 
-            log_info("Cleanup completed")
+        log_info("Cleanup completed")
+
+    def cleanup_all(self):
+        """Perform complete cleanup of all resources with enhanced error handling."""
+        with self._lock:
+            if not self._signal_handlers_registered or self._cleanup_in_progress:
+                return
+            self._cleanup_in_progress = True
+
+        try:
+            self._perform_cleanup()
         finally:
-            self._cleanup_in_progress = False
+            with self._lock:
+                self._cleanup_in_progress = False
 
     def cleanup_orphaned_temps(self, prefix: str = "coldstore_"):
         """Clean up any orphaned temporary files/directories from previous runs with enhanced handling."""
