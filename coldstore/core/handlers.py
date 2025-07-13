@@ -25,8 +25,8 @@ def sanitize_filename_for_windows(filename: str) -> str:
     Returns:
         Sanitized filename safe for Windows
     """
-    if not filename:
-        return filename
+    if not filename or not filename.strip():
+        return "renamed_file"
 
     # Replace Windows invalid characters with underscores
     invalid_chars = '<>:"|?*'
@@ -38,9 +38,13 @@ def sanitize_filename_for_windows(filename: str) -> str:
     sanitized = re.sub(r"[\x00-\x1f\x7f]", "_", sanitized)
 
     # Remove trailing dots and spaces (Windows doesn't allow these)
-    sanitized = sanitized.rstrip(". ")
+    # We need to handle filename and extension separately
+    path_obj = Path(sanitized)
+    stem = path_obj.stem.rstrip(". ")  # Remove trailing dots and spaces from filename
+    suffix = path_obj.suffix
+    sanitized = stem + suffix if stem else "file" + suffix if suffix else "file"
 
-    # Handle Windows reserved names
+    # Handle Windows reserved names (check after character replacement)
     reserved_names = {
         "CON",
         "PRN",
@@ -70,7 +74,9 @@ def sanitize_filename_for_windows(filename: str) -> str:
     name_part = Path(sanitized).stem.upper()
     if name_part in reserved_names:
         extension = Path(sanitized).suffix
-        sanitized = f"{name_part}_file{extension}"
+        # Get the original stem to preserve any underscores from character replacement
+        original_stem = Path(sanitized).stem
+        sanitized = f"{original_stem}_file{extension}"
 
     # Limit filename length (Windows has a 255 character limit for filenames)
     if len(sanitized) > 255:
@@ -82,8 +88,8 @@ def sanitize_filename_for_windows(filename: str) -> str:
         else:
             sanitized = sanitized[:255]
 
-    # Ensure we don't return an empty filename
-    if not sanitized or sanitized in (".", ".."):
+    # Ensure we don't return an empty filename or just dots
+    if not sanitized or sanitized in (".", "..") or not sanitized.strip():
         sanitized = "renamed_file"
 
     return sanitized
@@ -99,11 +105,14 @@ def sanitize_path_for_windows(path: str) -> str:
     Returns:
         Sanitized path safe for Windows
     """
-    if not path:
-        return path
+    if not path or not path.strip():
+        return "renamed_file"
+
+    # Normalize path separators to forward slashes first
+    normalized_path = path.replace("\\", "/")
 
     # Split path into components and sanitize each part
-    path_obj = Path(path)
+    path_obj = Path(normalized_path)
     parts = list(path_obj.parts)
 
     sanitized_parts = []
@@ -111,11 +120,12 @@ def sanitize_path_for_windows(path: str) -> str:
         if part in ("/", "\\"):  # Skip root separators
             continue
         sanitized_part = sanitize_filename_for_windows(part)
-        sanitized_parts.append(sanitized_part)
+        if sanitized_part:  # Only add non-empty parts
+            sanitized_parts.append(sanitized_part)
 
     # Reconstruct the path
     if not sanitized_parts:
-        return "extracted_file"
+        return "renamed_file"
 
     return str(Path(*sanitized_parts))
 
@@ -204,23 +214,145 @@ class SevenZipHandler(BaseArchiveHandler):
                     # Manual extraction with filename sanitization
                     renamed_files = []
 
-                    # Get all files with their data
-                    all_files = archive.readall()
+                    # Try multiple methods for compatibility with different py7zr versions
+                    extraction_success = False
 
-                    for original_path, file_data in all_files.items():
-                        sanitized_path = sanitize_path_for_windows(original_path)
+                    # Method 1: Try individual file extraction for better filename control
+                    try:
+                        log_detail(
+                            "Using individual file extraction for 7z with filename sanitization"
+                        )
+                        file_list = archive.list()
 
-                        if original_path != sanitized_path:
-                            renamed_files.append((original_path, sanitized_path))
+                        for file_info in file_list:
+                            original_path = file_info.filename
+                            sanitized_path = sanitize_path_for_windows(original_path)
 
-                        # Create target path
-                        target_path = extract_to / sanitized_path
-                        target_path.parent.mkdir(parents=True, exist_ok=True)
+                            if original_path != sanitized_path:
+                                renamed_files.append((original_path, sanitized_path))
 
-                        # Write file data if it's not a directory
-                        if file_data and not original_path.endswith("/"):
-                            with open(target_path, "wb") as f:
-                                f.write(file_data.read())
+                            # Create target path
+                            target_path = extract_to / sanitized_path
+
+                            # Skip directories or create them
+                            if original_path.endswith("/") or file_info.is_directory:
+                                target_path.mkdir(parents=True, exist_ok=True)
+                                continue
+
+                            # Ensure parent directory exists
+                            target_path.parent.mkdir(parents=True, exist_ok=True)
+
+                            # Extract individual file using extract method
+                            try:
+                                # Use a temporary directory for single file extraction
+                                import tempfile
+
+                                with tempfile.TemporaryDirectory() as temp_dir:
+                                    temp_path = Path(temp_dir)
+
+                                    # Extract this single file
+                                    archive.reset()  # Reset archive state
+                                    archive.extract(
+                                        path=temp_path, targets=[original_path]
+                                    )
+
+                                    # Find the extracted file
+                                    extracted_file = temp_path / original_path
+                                    if extracted_file.exists():
+                                        # Move to sanitized location
+                                        import shutil
+
+                                        shutil.copy2(extracted_file, target_path)
+                                    else:
+                                        log_warning(
+                                            f"Failed to extract file {original_path}"
+                                        )
+
+                            except Exception as extract_error:
+                                log_warning(
+                                    f"Failed to extract file {original_path}: {extract_error}"
+                                )
+                                continue
+
+                        extraction_success = True
+
+                    except Exception as e:
+                        log_detail(f"Individual file extraction failed: {e}")
+
+                    # Method 2: Fallback to extractall() with post-processing
+                    if not extraction_success:
+                        try:
+                            log_detail(
+                                "Using extractall() fallback method for 7z extraction"
+                            )
+                            log_warning(
+                                "Some files may fail to extract due to Windows file name restrictions"
+                            )
+
+                            # Create temporary directory for extraction
+                            import tempfile
+
+                            with tempfile.TemporaryDirectory() as temp_dir:
+                                temp_path = Path(temp_dir)
+
+                                # Extract to temporary directory first
+                                archive.extractall(path=temp_path)
+
+                                # Process and move files with sanitized names
+                                for temp_file_path in temp_path.rglob("*"):
+                                    if temp_file_path.is_file():
+                                        # Get relative path from temp directory
+                                        relative_path = temp_file_path.relative_to(
+                                            temp_path
+                                        )
+                                        original_path = str(relative_path).replace(
+                                            "\\", "/"
+                                        )
+                                        sanitized_path = sanitize_path_for_windows(
+                                            original_path
+                                        )
+
+                                        if original_path != sanitized_path:
+                                            renamed_files.append(
+                                                (original_path, sanitized_path)
+                                            )
+
+                                        # Create target path
+                                        target_path = extract_to / sanitized_path
+                                        target_path.parent.mkdir(
+                                            parents=True, exist_ok=True
+                                        )
+
+                                        # Copy file from temp to target
+                                        import shutil
+
+                                        shutil.copy2(temp_file_path, target_path)
+                                    elif temp_file_path.is_dir():
+                                        # Handle directories
+                                        relative_path = temp_file_path.relative_to(
+                                            temp_path
+                                        )
+                                        original_path = str(relative_path).replace(
+                                            "\\", "/"
+                                        )
+                                        sanitized_path = sanitize_path_for_windows(
+                                            original_path
+                                        )
+
+                                        if original_path != sanitized_path:
+                                            renamed_files.append(
+                                                (original_path, sanitized_path)
+                                            )
+
+                                        # Create target directory
+                                        target_path = extract_to / sanitized_path
+                                        target_path.mkdir(parents=True, exist_ok=True)
+
+                            extraction_success = True
+
+                        except Exception as e:
+                            log_error(f"All extraction methods failed: {e}")
+                            return False
 
                     # Log renamed files
                     if renamed_files:
